@@ -1,29 +1,50 @@
 import { prisma } from './db.js';
 import { ApiError } from './util.js';
 import type { Prisma } from '@prisma/client';
+import { saveChanges, type Op } from './changes.js';
 
 /**
- * RoomPlan CapturedRoom data structure (from Apple's RoomPlan framework)
+ * Apple RoomPlan CapturedRoom structure (real format from JSONEncoder)
  */
 export interface CapturedRoom {
-  dimensions: { width: number; length: number; height: number };
+  dimensions: number[]; // [width, length, height] in meters (simd_float3)
   walls: Array<{
     identifier: string;
-    dimensions: { width: number; length: number; height: number };
-    transform: number[]; // 4x4 matrix
+    category: string;
+    dimensions: number[]; // [width, length, height]
+    transform: number[]; // 4x4 column-major matrix
+    confidence: string;
+  }>;
+  doors: Array<{
+    identifier: string;
+    parentIdentifier: string;
+    category: string;
+    dimensions: number[]; // [width, height]
+    transform: number[];
+    confidence: string;
+  }>;
+  windows: Array<{
+    identifier: string;
+    parentIdentifier: string;
+    category: string;
+    dimensions: number[]; // [width, height]
+    transform: number[];
+    confidence: string;
   }>;
   openings: Array<{
     identifier: string;
-    parentIdentifier: string; // wall ID
-    type: 'window' | 'door' | 'opening';
-    dimensions: { width: number; height: number };
-    transform: number[]; // 4x4 matrix
+    parentIdentifier: string;
+    category: string;
+    dimensions: number[]; // [width, height]
+    transform: number[];
+    confidence: string;
   }>;
   objects: Array<{
     identifier: string;
     category: string;
-    dimensions: { width: number; length: number; height: number };
-    transform: number[]; // 4x4 matrix
+    dimensions: number[]; // [width, length, height]
+    transform: number[];
+    confidence: string;
   }>;
 }
 
@@ -34,6 +55,7 @@ interface ParsedRoom {
   ceilingIn: number;
   walls: Array<{
     index: number;
+    identifier: string;
     startXIn: number;
     startYIn: number;
     endXIn: number;
@@ -43,7 +65,8 @@ interface ParsedRoom {
   }>;
   openings: Array<{
     index: number;
-    wallIndex: number;
+    identifier: string;
+    wallIdentifier: string;
     type: 'window' | 'door' | 'open_span';
     offsetIn: number;
     widthIn: number;
@@ -62,19 +85,11 @@ interface ParsedRoom {
   }>;
 }
 
-/**
- * Convert meters to inches (RoomPlan uses meters)
- */
 function metersToInches(meters: number): number {
   return Math.round(meters * 39.3701);
 }
 
-/**
- * Extract position from 4x4 transform matrix
- */
 function extractPosition(transform: number[]): { x: number; y: number; z: number } {
-  // Transform matrix is column-major: [m00, m10, m20, m30, m01, m11, m21, m31, m02, m12, m22, m32, m03, m13, m23, m33]
-  // Position is in the last column: [m03, m13, m23]
   return {
     x: transform[12],
     y: transform[13],
@@ -82,74 +97,119 @@ function extractPosition(transform: number[]): { x: number; y: number; z: number
   };
 }
 
-/**
- * Extract rotation (yaw) from 4x4 transform matrix
- */
-function extractRotation(transform: number[]): number {
-  // Extract rotation around Y axis (yaw) from the transform matrix
+function extractRotationYaw(transform: number[]): number {
   const m00 = transform[0];
   const m02 = transform[8];
   const yaw = Math.atan2(m02, m00);
   return Math.round((yaw * 180) / Math.PI);
 }
 
-/**
- * Parse RoomPlan CapturedRoom data into our relational format.
- * All dimensions are converted to integer inches.
- */
+function calculateWallEndpoints(transform: number[], widthMeters: number) {
+  const pos = extractPosition(transform);
+  
+  const m00 = transform[0];
+  const m01 = transform[4];
+  const m02 = transform[8];
+  
+  const length = Math.sqrt(m00 * m00 + m01 * m01 + m02 * m02);
+  const dirX = length > 0 ? m00 / length : 1;
+  const dirZ = length > 0 ? m02 / length : 0;
+  
+  const halfWidth = widthMeters / 2;
+  
+  return {
+    startXIn: metersToInches(pos.x - dirX * halfWidth),
+    startYIn: metersToInches(pos.z - dirZ * halfWidth),
+    endXIn: metersToInches(pos.x + dirX * halfWidth),
+    endYIn: metersToInches(pos.z + dirZ * halfWidth),
+  };
+}
+
+function calculateOffsetAlongWall(
+  openingPos: { x: number; z: number },
+  wallStart: { x: number; z: number },
+  wallEnd: { x: number; z: number }
+): number {
+  const wallDx = wallEnd.x - wallStart.x;
+  const wallDz = wallEnd.z - wallStart.z;
+  const wallLength = Math.sqrt(wallDx * wallDx + wallDz * wallDz);
+  
+  if (wallLength === 0) return 0;
+  
+  const openingDx = openingPos.x - wallStart.x;
+  const openingDz = openingPos.z - wallStart.z;
+  
+  const projection = (openingDx * wallDx + openingDz * wallDz) / (wallLength * wallLength);
+  const offset = projection * wallLength;
+  
+  return metersToInches(Math.max(0, Math.min(wallLength, offset)));
+}
+
 export function parseCapturedRoom(data: CapturedRoom, label?: string): ParsedRoom {
-  const widthIn = metersToInches(data.dimensions.width);
-  const depthIn = metersToInches(data.dimensions.length);
-  const ceilingIn = metersToInches(data.dimensions.height);
+  const widthIn = metersToInches(data.dimensions[0]);
+  const depthIn = metersToInches(data.dimensions[1]);
+  const ceilingIn = metersToInches(data.dimensions[2]);
 
-  // Parse walls
   const walls = data.walls.map((wall, index) => {
-    const pos = extractPosition(wall.transform);
-    const widthM = wall.dimensions.width;
+    const widthMeters = wall.dimensions[0];
+    const heightMeters = wall.dimensions[2];
+    const endpoints = calculateWallEndpoints(wall.transform, widthMeters);
     
-    // Convert wall position and dimensions to room coordinates
-    const startXIn = metersToInches(pos.x - widthM / 2);
-    const startYIn = metersToInches(pos.z - widthM / 2);
-    const endXIn = metersToInches(pos.x + widthM / 2);
-    const endYIn = metersToInches(pos.z + widthM / 2);
-    const heightIn = metersToInches(wall.dimensions.height);
-
     return {
       index,
-      startXIn,
-      startYIn,
-      endXIn,
-      endYIn,
-      heightIn,
-      thicknessIn: 5, // Default 5 inches
+      identifier: wall.identifier,
+      startXIn: endpoints.startXIn,
+      startYIn: endpoints.startYIn,
+      endXIn: endpoints.endXIn,
+      endYIn: endpoints.endYIn,
+      heightIn: metersToInches(heightMeters),
+      thicknessIn: 5,
     };
   });
 
-  // Parse openings
-  const openings = data.openings.map((opening, index) => {
+  const wallMap = new Map(walls.map(w => [w.identifier, w]));
+
+  const allOpenings: Array<{
+    identifier: string;
+    parentIdentifier: string;
+    type: 'window' | 'door' | 'open_span';
+    dimensions: number[];
+    transform: number[];
+  }> = [
+    ...data.doors.map(d => ({ ...d, type: 'door' as const })),
+    ...data.windows.map(w => ({ ...w, type: 'window' as const })),
+    ...data.openings.map(o => ({ ...o, type: 'open_span' as const })),
+  ];
+
+  const openings = allOpenings.map((opening, index) => {
     const pos = extractPosition(opening.transform);
-    const parentWallIndex = data.walls.findIndex((w) => w.identifier === opening.parentIdentifier);
-
-    // Calculate offset along the wall
-    const offsetIn = metersToInches(pos.x);
-    const widthIn = metersToInches(opening.dimensions.width);
-    const heightIn = metersToInches(opening.dimensions.height);
-
+    const parentWall = wallMap.get(opening.parentIdentifier);
+    
+    const widthIn = metersToInches(opening.dimensions[0]);
+    const heightIn = metersToInches(opening.dimensions[1]);
+    
+    let offsetIn = 0;
+    if (parentWall) {
+      const wallStartMeters = { x: parentWall.startXIn / 39.3701, z: parentWall.startYIn / 39.3701 };
+      const wallEndMeters = { x: parentWall.endXIn / 39.3701, z: parentWall.endYIn / 39.3701 };
+      offsetIn = calculateOffsetAlongWall({ x: pos.x, z: pos.z }, wallStartMeters, wallEndMeters);
+    }
+    
     return {
       index,
-      wallIndex: parentWallIndex >= 0 ? parentWallIndex : 0,
-      type: opening.type === 'window' ? 'window' : opening.type === 'door' ? 'door' : 'open_span',
+      identifier: opening.identifier,
+      wallIdentifier: opening.parentIdentifier,
+      type: opening.type,
       offsetIn,
       widthIn,
-      sillIn: 36, // Default window sill height
-      headIn: heightIn + 36,
+      sillIn: opening.type === 'window' ? 36 : 0,
+      headIn: opening.type === 'window' ? 36 + heightIn : heightIn,
     };
   });
 
-  // Parse objects (furniture)
   const objects = data.objects.map((obj, index) => {
     const pos = extractPosition(obj.transform);
-    const rotation = extractRotation(obj.transform);
+    const rotation = extractRotationYaw(obj.transform);
 
     return {
       index,
@@ -157,9 +217,9 @@ export function parseCapturedRoom(data: CapturedRoom, label?: string): ParsedRoo
       xIn: metersToInches(pos.x),
       yIn: metersToInches(pos.z),
       rotationDeg: rotation,
-      widthIn: metersToInches(obj.dimensions.width),
-      depthIn: metersToInches(obj.dimensions.length),
-      heightIn: metersToInches(obj.dimensions.height),
+      widthIn: metersToInches(obj.dimensions[0]),
+      depthIn: metersToInches(obj.dimensions[1]),
+      heightIn: metersToInches(obj.dimensions[2]),
     };
   });
 
@@ -174,10 +234,6 @@ export function parseCapturedRoom(data: CapturedRoom, label?: string): ParsedRoo
   };
 }
 
-/**
- * Create a scan import from uploaded RoomPlan data.
- * Parses the data and stores it in scan_import_data table for review.
- */
 export async function createScanImport(params: {
   houseId: number;
   uploadId: number;
@@ -187,10 +243,8 @@ export async function createScanImport(params: {
 }) {
   const { houseId, uploadId, roomplanData, label, roomId } = params;
 
-  // Parse the RoomPlan data
   const parsed = parseCapturedRoom(roomplanData, label);
 
-  // Create scan import record
   const scanImport = await prisma.scanImport.create({
     data: {
       houseId,
@@ -201,10 +255,8 @@ export async function createScanImport(params: {
     },
   });
 
-  // Store parsed data in scan_import_data table
   const dataRecords: Prisma.ScanImportDataCreateManyInput[] = [];
 
-  // Room dimensions
   dataRecords.push(
     { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'label', value: parsed.label },
     { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'widthIn', value: String(parsed.widthIn) },
@@ -212,9 +264,9 @@ export async function createScanImport(params: {
     { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'ceilingIn', value: String(parsed.ceilingIn) }
   );
 
-  // Walls
   for (const wall of parsed.walls) {
     dataRecords.push(
+      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'identifier', value: wall.identifier },
       { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'startXIn', value: String(wall.startXIn) },
       { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'startYIn', value: String(wall.startYIn) },
       { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'endXIn', value: String(wall.endXIn) },
@@ -224,10 +276,10 @@ export async function createScanImport(params: {
     );
   }
 
-  // Openings
   for (const opening of parsed.openings) {
     dataRecords.push(
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'wallIndex', value: String(opening.wallIndex) },
+      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'identifier', value: opening.identifier },
+      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'wallIdentifier', value: opening.wallIdentifier },
       { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'type', value: opening.type },
       { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'offsetIn', value: String(opening.offsetIn) },
       { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'widthIn', value: String(opening.widthIn) },
@@ -236,7 +288,6 @@ export async function createScanImport(params: {
     );
   }
 
-  // Objects (detected furniture)
   for (const obj of parsed.objects) {
     dataRecords.push(
       { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'kind', value: obj.kind },
@@ -251,7 +302,6 @@ export async function createScanImport(params: {
 
   await prisma.scanImportData.createMany({ data: dataRecords });
 
-  // Mark upload as imported
   await prisma.upload.update({
     where: { id: uploadId },
     data: { status: 'imported', scanImportId: scanImport.id },
@@ -260,9 +310,6 @@ export async function createScanImport(params: {
   return scanImport;
 }
 
-/**
- * Get a scan import with all its parsed data.
- */
 export async function getScanImport(scanImportId: number) {
   const scanImport = await prisma.scanImport.findUnique({
     where: { id: scanImportId },
@@ -279,7 +326,6 @@ export async function getScanImport(scanImportId: number) {
     throw new ApiError(404, 'not_found', 'Scan import not found');
   }
 
-  // Reconstruct the parsed data
   const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
   
   for (const datum of scanImport.data) {
@@ -298,9 +344,6 @@ export async function getScanImport(scanImportId: number) {
   };
 }
 
-/**
- * List scan imports for a house.
- */
 export async function listScanImports(houseId: number, status?: 'pending' | 'promoted' | 'rejected') {
   return prisma.scanImport.findMany({
     where: {
@@ -316,11 +359,6 @@ export async function listScanImports(houseId: number, status?: 'pending' | 'pro
   });
 }
 
-/**
- * Promote a scan import to Current.
- * Creates the room structure with measurement source 'scan'.
- * Respects pinned manual measurements.
- */
 export async function promoteScanImport(
   scanImportId: number,
   actor: 'michael' | 'agent' = 'michael',
@@ -343,178 +381,147 @@ export async function promoteScanImport(
       throw new ApiError(400, 'already_processed', 'Scan import has already been promoted or rejected');
     }
 
-    const { parsedData } = reconstructParsedData(scanImport.data);
-    const roomData = parsedData.room?.[0];
+    const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
+    for (const datum of scanImport.data) {
+      if (!dataByEntity[datum.entityType]) {
+        dataByEntity[datum.entityType] = {};
+      }
+      if (!dataByEntity[datum.entityType][datum.entityIndex]) {
+        dataByEntity[datum.entityType][datum.entityIndex] = {};
+      }
+      dataByEntity[datum.entityType][datum.entityIndex][datum.field] = datum.value;
+    }
 
+    const roomData = dataByEntity.room?.[0];
     if (!roomData) {
       throw new ApiError(400, 'invalid_data', 'No room data found in scan import');
     }
 
-    // Get existing pinned measurements
-    const pinnedMeasurements = await prisma.measurement.findMany({
-      where: {
-        source: 'manual',
-        isOverride: true,
-        unpinnedAt: null,
-      },
-    });
-
-    const pinnedMap = new Map<string, number>();
-    for (const m of pinnedMeasurements) {
-      pinnedMap.set(`${m.entityType}:${m.entityId}:${m.field}`, m.valueIn);
-    }
-
-    // Create or update the Current room
-    const slug = 'family-room';
-    let room = await prisma.room.findFirst({
+    const slug = roomData.label?.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'scanned-room';
+    
+    let existingRoom = await prisma.room.findFirst({
       where: {
         houseId: scanImport.houseId,
         slug,
-        draftWorkspaceId: null, // Current room
+        draftWorkspaceId: null,
+      },
+      include: {
+        walls: { include: { openings: true } },
       },
     });
 
-    if (!room) {
-      // Create new Current room
-      room = await prisma.room.create({
+    const changes: Op[] = [];
+
+    if (!existingRoom) {
+      existingRoom = await prisma.room.create({
         data: {
           houseId: scanImport.houseId,
           slug,
-          label: roomData.label || 'Family Room',
+          label: roomData.label,
           ceilingIn: Number(roomData.ceilingIn),
-          floorMaterial: 'hardwood',
-          floorFinish: 'honey oak',
-          floorKeep: true,
           measurementStatus: 'scan',
+          floorMaterial: 'hardwood',
+          floorColor: '#d4a574',
+          floorKeep: true,
+          draftWorkspaceId: null,
+        },
+        include: {
+          walls: { include: { openings: true } },
         },
       });
     } else {
-      // Update existing room
-      await prisma.room.update({
-        where: { id: room.id },
-        data: {
-          label: roomData.label,
-          ceilingIn: pinnedMap.get(`room:${room.id}:ceilingIn`) ?? Number(roomData.ceilingIn),
-          measurementStatus: 'scan',
-        },
+      changes.push({
+        op: 'update',
+        entityType: 'room',
+        entityId: existingRoom.id,
+        field: 'label',
+        after: roomData.label,
       });
+      changes.push({
+        op: 'update',
+        entityType: 'room',
+        entityId: existingRoom.id,
+        field: 'ceilingIn',
+        after: Number(roomData.ceilingIn),
+      });
+
+      for (const wall of existingRoom.walls) {
+        changes.push({ op: 'delete', entityType: 'wall', entityId: wall.id });
+      }
     }
 
-    // Record room measurements
-    await recordMeasurementIfNotPinned(prisma, {
-      entityType: 'room',
-      entityId: room.id,
-      field: 'ceilingIn',
-      valueIn: Number(roomData.ceilingIn),
-      source: 'scan',
-      uploadId: scanImport.uploadId,
-      actor,
-    }, pinnedMap);
-
-    // Delete existing walls and recreate from scan
-    await prisma.wall.deleteMany({ where: { roomId: room.id } });
-
-    // Create walls
-    const wallMap = new Map<number, number>(); // entityIndex -> wall.id
-    for (const [indexStr, wallData] of Object.entries(parsedData.wall || {})) {
-      const index = Number(indexStr);
-      const wall = await prisma.wall.create({
-        data: {
-          roomId: room.id,
+    for (const [idxStr, wallData] of Object.entries(dataByEntity.wall || {})) {
+      const wallRef = `wall-${idxStr}`;
+      changes.push({
+        op: 'create',
+        entityType: 'wall',
+        tempRef: wallRef,
+        fields: {
+          roomId: existingRoom.id,
           startXIn: Number(wallData.startXIn),
           startYIn: Number(wallData.startYIn),
           endXIn: Number(wallData.endXIn),
           endYIn: Number(wallData.endYIn),
           heightIn: Number(wallData.heightIn),
           thicknessIn: Number(wallData.thicknessIn || 5),
-          measurementStatus: 'scan',
         },
       });
-      wallMap.set(index, wall.id);
-
-      // Record wall measurements
-      for (const field of ['startXIn', 'startYIn', 'endXIn', 'endYIn', 'heightIn']) {
-        await recordMeasurementIfNotPinned(prisma, {
-          entityType: 'wall',
-          entityId: wall.id,
-          field,
-          valueIn: Number(wallData[field]),
-          source: 'scan',
-          uploadId: scanImport.uploadId,
-          actor,
-        }, pinnedMap);
-      }
     }
 
-    // Delete existing openings and recreate from scan
-    await prisma.opening.deleteMany({ where: { wall: { roomId: room.id } } });
+    const wallRefs = new Map<string, string>();
+    for (const [idxStr, wallData] of Object.entries(dataByEntity.wall || {})) {
+      wallRefs.set(wallData.identifier, `wall-${idxStr}`);
+    }
 
-    // Create openings
-    for (const [, openingData] of Object.entries(parsedData.opening || {})) {
-      const wallIndex = Number(openingData.wallIndex);
-      const wallId = wallMap.get(wallIndex);
-      if (!wallId) continue;
-
-      const opening = await prisma.opening.create({
-        data: {
-          wallId,
-          type: openingData.type as any,
-          offsetIn: Number(openingData.offsetIn),
-          widthIn: Number(openingData.widthIn),
-          sillIn: Number(openingData.sillIn || 36),
-          headIn: Number(openingData.headIn || 84),
-          measurementStatus: 'scan',
-        },
-      });
-
-      // Record opening measurements
-      for (const field of ['offsetIn', 'widthIn', 'sillIn', 'headIn']) {
-        await recordMeasurementIfNotPinned(prisma, {
+    for (const [idxStr, openingData] of Object.entries(dataByEntity.opening || {})) {
+      const wallRef = wallRefs.get(openingData.wallIdentifier);
+      if (wallRef) {
+        changes.push({
+          op: 'create',
           entityType: 'opening',
-          entityId: opening.id,
-          field,
-          valueIn: Number(openingData[field]),
-          source: 'scan',
-          uploadId: scanImport.uploadId,
-          actor,
-        }, pinnedMap);
+          tempRef: `opening-${idxStr}`,
+          fields: {
+            wallId: `$${wallRef}`,
+            type: openingData.type,
+            offsetIn: Number(openingData.offsetIn),
+            widthIn: Number(openingData.widthIn),
+            sillIn: Number(openingData.sillIn),
+            headIn: Number(openingData.headIn),
+          },
+        });
       }
     }
 
-    // Create revision
-    const house = await prisma.house.findUnique({ where: { id: scanImport.houseId } });
-    const revisionNumber = (house?.currentRevision || 0) + 1;
+    let revisionNumber = scanImport.house.currentRevision || 0;
+    
+    if (changes.length > 0) {
+      const result = await saveChanges(
+        prisma,
+        null,
+        revisionNumber,
+        changes,
+        `Promoted scan: ${roomData.label}`,
+        { houseId: scanImport.houseId, isCurrent: true }
+      );
+      revisionNumber = typeof result.revision === 'number' ? result.revision : result.revision.number;
+    }
 
-    const revision = await prisma.revision.create({
-      data: {
-        houseId: scanImport.houseId,
-        workspaceId: null,
-        scope: 'current',
-        number: revisionNumber,
-        actor,
-        kind: 'rescan',
-        note: `Promoted scan import: ${roomData.label}`,
-      },
-    });
-
-    // Update house's currentRevision
-    await prisma.house.update({
-      where: { id: scanImport.houseId },
-      data: { currentRevision: revision.id },
-    });
-
-    // Mark scan import as promoted
     await prisma.scanImport.update({
       where: { id: scanImportId },
       data: {
         status: 'promoted',
         promotedAt: new Date(),
         promotedBy: actor,
-        roomId: room.id,
+        roomId: existingRoom.id,
       },
     });
 
-    return { success: true, roomId: room.id, revisionId: revision.id };
+    await prisma.house.update({
+      where: { id: scanImport.houseId },
+      data: { currentRevision: revisionNumber },
+    });
+
+    return { success: true, roomId: existingRoom.id, revisionId: revisionNumber };
   };
 
   if (tx) {
@@ -524,55 +531,6 @@ export async function promoteScanImport(
   }
 }
 
-async function recordMeasurementIfNotPinned(
-  prisma: any,
-  params: {
-    entityType: string;
-    entityId: number;
-    field: string;
-    valueIn: number;
-    source: string;
-    uploadId: number;
-    actor: 'michael' | 'agent' | 'system';
-  },
-  pinnedMap: Map<string, number>
-) {
-  const key = `${params.entityType}:${params.entityId}:${params.field}`;
-  const pinnedValue = pinnedMap.get(key);
-
-  await prisma.measurement.create({
-    data: {
-      entityType: params.entityType,
-      entityId: params.entityId,
-      field: params.field,
-      valueIn: params.valueIn,
-      source: params.source as any,
-      uploadId: params.uploadId,
-      recordedBy: params.actor,
-      note: pinnedValue != null ? `Scan value: ${params.valueIn}, pinned value: ${pinnedValue} preserved` : null,
-    },
-  });
-}
-
-function reconstructParsedData(data: any[]) {
-  const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
-  
-  for (const datum of data) {
-    if (!dataByEntity[datum.entityType]) {
-      dataByEntity[datum.entityType] = {};
-    }
-    if (!dataByEntity[datum.entityType][datum.entityIndex]) {
-      dataByEntity[datum.entityType][datum.entityIndex] = {};
-    }
-    dataByEntity[datum.entityType][datum.entityIndex][datum.field] = datum.value;
-  }
-
-  return { parsedData: dataByEntity };
-}
-
-/**
- * Reject a scan import.
- */
 export async function rejectScanImport(scanImportId: number, notes?: string) {
   const scanImport = await prisma.scanImport.findUnique({ where: { id: scanImportId } });
 

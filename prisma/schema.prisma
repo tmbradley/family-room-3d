@@ -614,6 +614,7 @@ model Upload {
   id            Int          @id @default(autoincrement())
   houseId       Int          @map("house_id")
   roomId        Int?         @map("room_id")
+  tokenId       Int?         @map("token_id")
   kind          UploadKind
   format        UploadFormat
   bucketKey     String       @unique @map("bucket_key") @db.VarChar(500)
@@ -621,15 +622,17 @@ model Upload {
   status        UploadStatus @default(pending)
   uploadedBy    Actor        @map("uploaded_by")
   scanImportId  Int?         @map("scan_import_id")
-  createdAt     DateTime     @default(now()) @map("created_at")
+  createdAt     DateTime     @default(now()) @map("created_at") @db.DateTime(0)
 
   house        House         @relation(fields: [houseId], references: [id], onDelete: Cascade)
   room         Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  token        UploadToken?  @relation(fields: [tokenId], references: [id], onDelete: SetNull)
   scanImport   ScanImport?   @relation("scanFiles", fields: [scanImportId], references: [id], onDelete: SetNull)
   measurements Measurement[]
   primaryFor   ScanImport[]  @relation("primaryUpload")
 
   @@index([scanImportId])
+  @@index([tokenId])
   @@map("uploads")
 }
 
@@ -779,13 +782,18 @@ model AgentKey {
 }
 
 model UploadToken {
-  id        Int       @id @default(autoincrement())
-  tokenHash String    @unique @map("token_hash") @db.Char(64)
-  roomId    Int?      @map("room_id")
-  expiresAt DateTime  @map("expires_at")
-  usedAt    DateTime? @map("used_at")
+  id           Int       @id @default(autoincrement())
+  tokenHash    String    @unique @map("token_hash") @db.Char(64)
+  roomId       Int?      @map("room_id")
+  newRoom      Boolean   @default(false) @map("new_room")
+  uploadLimit  Int       @default(10) @map("upload_limit")
+  uploadCount  Int       @default(0) @map("upload_count")
+  expiresAt    DateTime  @map("expires_at") @db.DateTime(0)
+  usedAt       DateTime? @map("used_at") @db.DateTime(0)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.DateTime(0)
 
-  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  room    Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  uploads Upload[]
 
   @@map("upload_tokens")
 }
@@ -799,9 +807,9 @@ model ScanImport {
   status     ScanImportStatus @default(pending)
   label      String?          @db.VarChar(120)
   notes      String?          @db.Text
-  promotedAt DateTime?        @map("promoted_at")
+  promotedAt DateTime?        @map("promoted_at") @db.DateTime(0)
   promotedBy Actor?           @map("promoted_by")
-  createdAt  DateTime         @default(now()) @map("created_at")
+  createdAt  DateTime         @default(now()) @map("created_at") @db.DateTime(0)
 
   house       House             @relation(fields: [houseId], references: [id], onDelete: Cascade)
   room        Room?             @relation(fields: [roomId], references: [id], onDelete: SetNull)

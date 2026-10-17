@@ -119,7 +119,8 @@ test('editor save is a revision; conflicting base revision is refused; stale pro
   const rev = (await ws()).revision;
   const p = await propose([{ op: 'update', entityType: 'placement', entityId: sofa, field: 'yIn', value: 50 }]);
   const s = await tx((t) => saveChanges(t, W, rev, [{ op: 'update', entityType: 'placement', entityId: sofa, field: 'yIn', after: 44 }]));
-  assert.equal(s.revision, rev + 1);
+  const sRevNum = typeof s.revision === 'number' ? s.revision : s.revision.number;
+  assert.equal(sRevNum, rev + 1);
   await assert.rejects(tx((t) => saveChanges(t, W, rev, [{ op: 'update', entityType: 'placement', entityId: sofa, field: 'yIn', after: 45 }])), /revision/);
   await assert.rejects(approveProposal(p.id), /changed since this was proposed/);
   assert.equal((await placement(sofa))!.yIn, 44);

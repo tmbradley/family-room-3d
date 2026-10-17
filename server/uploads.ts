@@ -24,16 +24,19 @@ export interface UploadToken {
 
 /**
  * Generate a short-lived upload token for the App Clip.
- * The token can be used to upload scan data for a specific room (or any room if roomId is null).
+ * The token can be used to upload scan data for a specific room or a new room.
  */
-export async function generateUploadToken(roomId?: number): Promise<UploadToken> {
+export async function generateUploadToken(params: { roomId?: number; newRoom?: boolean; uploadLimit?: number }): Promise<UploadToken> {
   const token = humanCode(3, 4); // e.g. "ABCD-EFGH-IJKL"
   const expiresAt = new Date(Date.now() + TOKEN_EXPIRY_MINUTES * 60 * 1000);
 
   await prisma.uploadToken.create({
     data: {
       tokenHash: sha256(token.replace(/-/g, '').toLowerCase()),
-      roomId: roomId ?? null,
+      roomId: params.roomId ?? null,
+      newRoom: params.newRoom ?? false,
+      uploadLimit: params.uploadLimit ?? 10,
+      uploadCount: 0,
       expiresAt,
     },
   });
@@ -43,36 +46,40 @@ export async function generateUploadToken(roomId?: number): Promise<UploadToken>
 
 /**
  * Exchange an upload token for authenticated access.
- * Returns the token record if valid and not yet used.
+ * Returns the token record if valid.
  */
 export async function validateUploadToken(token: string) {
   const normalized = token.replace(/-/g, '').toLowerCase();
   const record = await prisma.uploadToken.findUnique({
     where: { tokenHash: sha256(normalized) },
+    include: { uploads: true },
   });
 
   if (!record) {
     throw new ApiError(401, 'invalid_token', 'Upload token not found');
   }
 
-  if (record.usedAt) {
-    throw new ApiError(401, 'token_used', 'Upload token has already been used');
-  }
-
   if (record.expiresAt < new Date()) {
     throw new ApiError(401, 'token_expired', 'Upload token has expired');
+  }
+
+  if (record.uploadCount >= record.uploadLimit) {
+    throw new ApiError(429, 'upload_limit_reached', `Upload limit of ${record.uploadLimit} reached for this token`);
   }
 
   return record;
 }
 
 /**
- * Mark an upload token as used.
+ * Increment the upload count for a token.
  */
-export async function markTokenUsed(tokenId: number) {
+export async function incrementTokenUploadCount(tokenId: number) {
   await prisma.uploadToken.update({
     where: { id: tokenId },
-    data: { usedAt: new Date() },
+    data: { 
+      uploadCount: { increment: 1 },
+      usedAt: new Date(),
+    },
   });
 }
 
@@ -90,11 +97,12 @@ export interface PresignedUpload {
 export async function generatePresignedUpload(params: {
   houseId: number;
   roomId?: number;
+  tokenId?: number;
   kind: 'scan' | 'photo';
   format: 'usdz' | 'glb' | 'roomplan_json' | 'jpg' | 'heic' | 'png';
   scanImportId?: number;
 }): Promise<PresignedUpload> {
-  const { houseId, roomId, kind, format, scanImportId } = params;
+  const { houseId, roomId, tokenId, kind, format, scanImportId } = params;
 
   // Generate unique bucket key
   const timestamp = Date.now();
@@ -106,6 +114,7 @@ export async function generatePresignedUpload(params: {
     data: {
       houseId,
       roomId: roomId ?? null,
+      tokenId: tokenId ?? null,
       kind,
       format,
       bucketKey,
@@ -136,8 +145,19 @@ export async function generatePresignedUpload(params: {
 
 /**
  * Mark an upload as completed after successful S3 upload.
+ * Verifies that the upload belongs to the given token.
  */
-export async function completeUpload(uploadId: number, bytes: number) {
+export async function completeUpload(uploadId: number, bytes: number, tokenId?: number) {
+  const upload = await prisma.upload.findUnique({ where: { id: uploadId } });
+  
+  if (!upload) {
+    throw new ApiError(404, 'upload_not_found', 'Upload not found');
+  }
+
+  if (tokenId && upload.tokenId !== tokenId) {
+    throw new ApiError(403, 'forbidden', 'This upload does not belong to your token');
+  }
+
   await prisma.upload.update({
     where: { id: uploadId },
     data: {
@@ -145,6 +165,10 @@ export async function completeUpload(uploadId: number, bytes: number) {
       bytes,
     },
   });
+  
+  if (tokenId) {
+    await incrementTokenUploadCount(tokenId);
+  }
 }
 
 function getContentType(format: string): string {

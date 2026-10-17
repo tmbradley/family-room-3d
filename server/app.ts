@@ -13,10 +13,9 @@ import { approveProposal, createProposal, getProposal, listProposals, previewPro
 import { measurementHistory, recordMeasurement, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
-import { 
+import {
   generateUploadToken, 
   validateUploadToken, 
-  markTokenUsed, 
   generatePresignedUpload, 
   completeUpload 
 } from './uploads.js';
@@ -142,8 +141,12 @@ app.get('/api/measurements', read, async (c) => c.json(await measurementHistory(
 
 // Upload tokens and pairing
 app.post('/api/upload-tokens', read, michaelOnly, async (c) => {
-  const body = z.object({ roomId: z.number().int().optional() }).parse(await c.req.json().catch(() => ({})));
-  const token = await generateUploadToken(body.roomId);
+  const body = z.object({ 
+    roomId: z.number().int().optional(),
+    newRoom: z.boolean().optional(),
+    uploadLimit: z.number().int().optional(),
+  }).parse(await c.req.json().catch(() => ({})));
+  const token = await generateUploadToken(body);
   return c.json(token, 201);
 });
 
@@ -194,13 +197,7 @@ app.post('/api/uploads/:id/complete', async (c) => {
   return c.json({ success: true });
 });
 
-// Mark token as used after all uploads complete
-app.post('/api/upload-tokens/:id/complete', async (c) => {
-  const body = z.object({ token: z.string() }).parse(await c.req.json());
-  const tokenRecord = await validateUploadToken(body.token);
-  await markTokenUsed(tokenRecord.id);
-  return c.json({ success: true });
-});
+// No longer needed - upload count is incremented on each upload completion
 
 // Import scan from RoomPlan data
 app.post('/api/scans/import', async (c) => {

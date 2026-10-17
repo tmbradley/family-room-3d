@@ -113,14 +113,14 @@ class UploadManager: ObservableObject {
     }
     
     private func exportRoomPlanData(room: CapturedRoom) async throws -> (Data, URL) {
-        // Export to JSON
-        let jsonURL = FileManager.default.temporaryDirectory.appendingPathComponent("room.json")
-        try room.export(to: jsonURL, exportOptions: .model)
-        let jsonData = try Data(contentsOf: jsonURL)
+        // Export to JSON using JSONEncoder
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        let jsonData = try encoder.encode(room)
         
         // Export to USDZ
         let usdzURL = FileManager.default.temporaryDirectory.appendingPathComponent("room.usdz")
-        try room.export(to: usdzURL, exportOptions: .mesh)
+        try room.export(to: usdzURL, exportOptions: .model)
         
         return (jsonData, usdzURL)
     }

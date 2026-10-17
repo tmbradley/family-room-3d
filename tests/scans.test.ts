@@ -3,68 +3,81 @@ import assert from 'node:assert';
 import { PrismaClient } from '@prisma/client';
 import { parseCapturedRoom, type CapturedRoom } from '../server/scans.js';
 
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL required for tests');
+if (!process.env.TEST_DATABASE_URL) {
+  throw new Error('TEST_DATABASE_URL environment variable is required for tests. Never use DATABASE_URL for testing.');
+}
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const prisma = new PrismaClient({ datasources: { db: { url: TEST_DATABASE_URL } } });
 
-// Sample CapturedRoom fixture (simplified)
+// Sample CapturedRoom fixture - Real Apple RoomPlan format
 const sampleCapturedRoom: CapturedRoom = {
-  dimensions: {
-    width: 3.6576, // ~12 feet
-    length: 3.9624, // ~13 feet
-    height: 2.7432, // ~9 feet
-  },
+  dimensions: [3.6576, 3.9624, 2.7432], // [width, length, height] in meters
   walls: [
     {
       identifier: 'wall-0',
-      dimensions: { width: 3.6576, length: 0.127, height: 2.7432 },
+      category: 'wall',
+      dimensions: [3.6576, 0.127, 2.7432],
       transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      confidence: 'high',
     },
     {
       identifier: 'wall-1',
-      dimensions: { width: 3.9624, length: 0.127, height: 2.7432 },
+      category: 'wall',
+      dimensions: [3.9624, 0.127, 2.7432],
       transform: [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 3.6576, 0, 0, 1],
+      confidence: 'high',
     },
     {
       identifier: 'wall-2',
-      dimensions: { width: 3.6576, length: 0.127, height: 2.7432 },
+      category: 'wall',
+      dimensions: [3.6576, 0.127, 2.7432],
       transform: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 3.6576, 0, 3.9624, 1],
+      confidence: 'high',
     },
     {
       identifier: 'wall-3',
-      dimensions: { width: 3.9624, length: 0.127, height: 2.7432 },
+      category: 'wall',
+      dimensions: [3.9624, 0.127, 2.7432],
       transform: [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 3.9624, 1],
+      confidence: 'high',
     },
   ],
-  openings: [
-    {
-      identifier: 'window-0',
-      parentIdentifier: 'wall-2',
-      type: 'window',
-      dimensions: { width: 1.524, height: 1.2192 }, // ~5 ft × 4 ft
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2192, 1.2192, 0, 1],
-    },
+  doors: [
     {
       identifier: 'door-0',
       parentIdentifier: 'wall-3',
-      type: 'door',
-      dimensions: { width: 0.9144, height: 2.0320 }, // ~3 ft × 6.67 ft
+      category: 'door',
+      dimensions: [0.9144, 2.0320], // [width, height] ~3 ft × 6.67 ft
       transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.9144, 0, 1.9812, 1],
+      confidence: 'medium',
     },
   ],
+  windows: [
+    {
+      identifier: 'window-0',
+      parentIdentifier: 'wall-2',
+      category: 'window',
+      dimensions: [1.524, 1.2192], // [width, height] ~5 ft × 4 ft
+      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2192, 1.2192, 0, 1],
+      confidence: 'high',
+    },
+  ],
+  openings: [],
   objects: [
     {
       identifier: 'sofa-0',
       category: 'sofa',
-      dimensions: { width: 2.1336, length: 0.9144, height: 0.8382 }, // ~7 ft × 3 ft × 2.75 ft
+      dimensions: [2.1336, 0.9144, 0.8382], // ~7 ft × 3 ft × 2.75 ft
       transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.8288, 0.4191, 0.6096, 1],
+      confidence: 'medium',
     },
     {
       identifier: 'table-0',
       category: 'table',
-      dimensions: { width: 1.2192, length: 0.6096, height: 0.4572 }, // ~4 ft × 2 ft × 1.5 ft
+      dimensions: [1.2192, 0.6096, 0.4572], // ~4 ft × 2 ft × 1.5 ft
       transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.8288, 0.2286, 1.8288, 1],
+      confidence: 'medium',
     },
   ],
 };

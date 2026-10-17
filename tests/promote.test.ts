@@ -3,23 +3,27 @@ import assert from 'node:assert';
 import { PrismaClient } from '@prisma/client';
 import { createScanImport, promoteScanImport, rejectScanImport, type CapturedRoom } from '../server/scans.js';
 
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
-if (!TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL required for tests');
+if (!process.env.TEST_DATABASE_URL) {
+  throw new Error('TEST_DATABASE_URL environment variable is required for tests. Never use DATABASE_URL for testing.');
+}
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 
 const prisma = new PrismaClient({ datasources: { db: { url: TEST_DATABASE_URL } } });
 
-// Sample scan data
+// Sample scan data - Real Apple RoomPlan format
 const sampleScan: CapturedRoom = {
-  dimensions: { width: 3.6576, length: 3.9624, height: 2.7432 },
+  dimensions: [3.6576, 3.9624, 2.7432],
   walls: [
-    { identifier: 'w1', dimensions: { width: 3.6576, length: 0.127, height: 2.7432 }, transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
-    { identifier: 'w2', dimensions: { width: 3.9624, length: 0.127, height: 2.7432 }, transform: [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 3.6576, 0, 0, 1] },
-    { identifier: 'w3', dimensions: { width: 3.6576, length: 0.127, height: 2.7432 }, transform: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 3.6576, 0, 3.9624, 1] },
-    { identifier: 'w4', dimensions: { width: 3.9624, length: 0.127, height: 2.7432 }, transform: [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 3.9624, 1] },
+    { identifier: 'w1', category: 'wall', dimensions: [3.6576, 0.127, 2.7432], transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], confidence: 'high' },
+    { identifier: 'w2', category: 'wall', dimensions: [3.9624, 0.127, 2.7432], transform: [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 3.6576, 0, 0, 1], confidence: 'high' },
+    { identifier: 'w3', category: 'wall', dimensions: [3.6576, 0.127, 2.7432], transform: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 3.6576, 0, 3.9624, 1], confidence: 'high' },
+    { identifier: 'w4', category: 'wall', dimensions: [3.9624, 0.127, 2.7432], transform: [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 3.9624, 1], confidence: 'high' },
   ],
-  openings: [
-    { identifier: 'win1', parentIdentifier: 'w3', type: 'window', dimensions: { width: 1.524, height: 1.2192 }, transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2192, 1.2192, 0, 1] },
+  doors: [],
+  windows: [
+    { identifier: 'win1', parentIdentifier: 'w3', category: 'window', dimensions: [1.524, 1.2192], transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2192, 1.2192, 0, 1], confidence: 'medium' },
   ],
+  openings: [],
   objects: [],
 };
 

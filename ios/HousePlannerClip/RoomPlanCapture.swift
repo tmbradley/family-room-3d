@@ -53,11 +53,3 @@ struct RoomCaptureViewRepresentable: UIViewRepresentable {
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {}
 }
-
-// Extension to make RoomCaptureSession accessible
-extension RoomPlanCapture {
-    var roomCaptureSession: RoomCaptureSession? {
-        get { roomCaptureSession }
-        set { roomCaptureSession = newValue }
-    }
-}

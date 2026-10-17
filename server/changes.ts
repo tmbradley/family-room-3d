@@ -18,7 +18,7 @@ export type RevChange = {
 };
 
 export type ApplyCtx = {
-  workspaceId: number;
+  workspaceId: number | null;
   mode: 'save' | 'proposal' | 'rollback' | 'measurement';
   /** For "new workspace" proposals: ids in the base workspace -> ids in the copy. */
   idMap?: Map<string, number>;
@@ -36,14 +36,18 @@ export async function isPinned(tx: Tx, entityType: string, entityId: number, fie
   return !!pin;
 }
 
-export async function lockWorkspace(tx: Tx, workspaceId: number) {
+export async function lockWorkspace(tx: Tx, workspaceId: number | null) {
+  if (workspaceId === null) return null;
   await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`;
   const ws = await tx.workspace.findUnique({ where: { id: workspaceId } });
   if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
   return ws;
 }
 
-const mapId = (ctx: ApplyCtx, type: string, id: number) => ctx.idMap?.get(`${type}:${id}`) ?? id;
+const mapId = (ctx: ApplyCtx, type: string, id: number) => {
+  if (ctx.workspaceId === null) return id;
+  return ctx.idMap?.get(`${type}:${id}`) ?? id;
+};
 
 export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   const changes: RevChange[] = [];
@@ -52,7 +56,10 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   const W = ctx.workspaceId;
   const allowSystem = ctx.mode === 'rollback';
   let roomIds: Set<number> | null = null;
-  const rooms = async () => (roomIds ??= await workspaceRoomIds(tx, W));
+  const rooms = async () => {
+    if (W === null || W === -1) return new Set<number>();
+    return (roomIds ??= await workspaceRoomIds(tx, W));
+  };
 
   const resolve = (type: string, field: string, raw: unknown) => {
     if (typeof raw === 'string' && raw.startsWith('$')) {
@@ -67,6 +74,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   };
 
   const checkOwner = async (type: string, row: any) => {
+    if (W === null || W === -1) return;
     const owner = await ownerOf(tx, type, row);
     if (owner === 'global' || owner === W) return;
     throw new ApiError(403, 'not_in_workspace', `${type} ${row.id ?? ''} isn't part of workspace ${W}${owner === null ? ' (it belongs to Current)' : ''}`);
@@ -163,31 +171,71 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
 
 export async function commitRevision(
   tx: Tx,
-  p: { workspaceId: number; kind: RevisionKind; actor: Actor; agentKeyId?: number | null; proposalId?: number | null; note?: string | null; rollsBackRevisionId?: number | null; changes: RevChange[] },
+  p: { workspaceId: number | null; houseId?: number; kind: RevisionKind; actor: Actor; agentKeyId?: number | null; proposalId?: number | null; note?: string | null; rollsBackRevisionId?: number | null; changes: RevChange[]; baseRevision?: number },
 ) {
-  const ws = await tx.workspace.findUniqueOrThrow({ where: { id: p.workspaceId } });
-  const number = ws.revision + 1;
+  let houseId: number;
+  let number: number;
+  let scope: string;
+
+  if (p.workspaceId !== null) {
+    const ws = await tx.workspace.findUniqueOrThrow({ where: { id: p.workspaceId } });
+    houseId = ws.houseId;
+    number = ws.revision + 1;
+    scope = `workspace:${ws.id}`;
+  } else {
+    if (!p.houseId) throw new ApiError(400, 'invalid_request', 'houseId required for Current revisions');
+    houseId = p.houseId;
+    number = (p.baseRevision ?? 0) + 1;
+    scope = 'current';
+  }
+
   const rev = await tx.revision.create({
     data: {
-      houseId: ws.houseId, workspaceId: ws.id, scope: `workspace:${ws.id}`, number, actor: p.actor, kind: p.kind,
+      houseId, workspaceId: p.workspaceId, scope, number, actor: p.actor, kind: p.kind,
       agentKeyId: p.agentKeyId ?? null, proposalId: p.proposalId ?? null, rollsBackRevisionId: p.rollsBackRevisionId ?? null,
       note: p.note?.slice(0, 1000) ?? null,
     },
   });
   if (p.changes.length) await tx.revisionChange.createMany({ data: p.changes.map((c, seq) => ({ ...c, seq, revisionId: rev.id, field: c.field ?? null })) });
-  await tx.workspace.update({ where: { id: ws.id }, data: { revision: number } });
+  
+  if (p.workspaceId !== null) {
+    await tx.workspace.update({ where: { id: p.workspaceId }, data: { revision: number } });
+  }
+  
   return rev;
 }
 
 /** Michael's own edit from the editor: applied directly, recorded as a "save" revision. */
-export async function saveChanges(tx: Tx, workspaceId: number, baseRevision: number, ops: Op[], note?: string) {
+export async function saveChanges(
+  tx: Tx,
+  workspaceId: number | null,
+  baseRevision: number,
+  ops: Op[],
+  note?: string,
+  params?: { houseId?: number; isCurrent?: boolean }
+) {
   const ws = await lockWorkspace(tx, workspaceId);
-  if (ws.revision !== baseRevision)
-    throw new ApiError(409, 'conflict', `Workspace is at revision ${ws.revision}, your edit was based on ${baseRevision}. Reload to get the latest.`, { revision: ws.revision });
-  const { changes, refs } = await applyOps(tx, ops, { workspaceId, mode: 'save' });
-  if (!changes.length) return { revision: ws.revision, refs, unchanged: true };
-  const rev = await commitRevision(tx, { workspaceId, kind: 'save', actor: 'michael', note: note ?? 'Edit in the editor', changes });
-  return { revision: rev.number, refs, unchanged: false };
+  
+  if (workspaceId !== null && ws) {
+    if (ws.revision !== baseRevision)
+      throw new ApiError(409, 'conflict', `Workspace is at revision ${ws.revision}, your edit was based on ${baseRevision}. Reload to get the latest.`, { revision: ws.revision });
+  }
+
+  const effectiveWorkspaceId = workspaceId === null ? null : workspaceId;
+  const { changes, refs } = await applyOps(tx, ops, { workspaceId: effectiveWorkspaceId, mode: 'save' });
+  if (!changes.length && workspaceId && ws) return { revision: ws.revision, refs, unchanged: true };
+
+  const rev = await commitRevision(tx, {
+    workspaceId,
+    houseId: params?.houseId ?? (ws?.houseId ?? undefined),
+    kind: 'save',
+    actor: params?.isCurrent ? 'system' : 'michael',
+    note: note ?? 'Edit in the editor',
+    changes,
+    baseRevision,
+  });
+
+  return { revision: rev, refs, roomId: refs['room-1'], unchanged: false };
 }
 
 /** Inverse ops for one revision's change rows (newest first). */
@@ -220,6 +268,7 @@ export function inverseOps(rows: { seq: number; op: string; entityType: string; 
 /** Roll a workspace back to the state right after revision `toRevision`. The rollback is itself a new revision. */
 export async function rollbackWorkspace(tx: Tx, workspaceId: number, toRevision: number, note?: string) {
   const ws = await lockWorkspace(tx, workspaceId);
+  if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
   if (!Number.isInteger(toRevision) || toRevision < 0 || toRevision >= ws.revision)
     throw new ApiError(400, 'invalid_revision', `Pick a revision between 0 and ${ws.revision - 1}`);
   const later = await tx.revision.findMany({
