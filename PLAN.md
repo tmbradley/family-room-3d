@@ -94,7 +94,7 @@ Edits snap to 1" by default (toggle off for free placement). Every edit can be u
 
 ## 5. Furniture and shopping lists
 
-- **Catalog:** furniture lives in the `furniture_items` table in Postgres (section 6). Each item is
+- **Catalog:** furniture lives in the `furniture_items` table in MySQL (section 6). Each item is
   one piece: name, kind (sofa, chair, table, rug, lamp, ...), width, depth, and height in inches,
   color, store, product URL, price, image, and a status like idea / shortlisted / bought.
 - **Notion (optional):** Michael's private ("personal") Notion can be a friendly view or editor for
@@ -140,9 +140,9 @@ the catalog as a "store" option. The list isn't filled in here until that resear
 
 ---
 
-## 6. Architecture and data storage (Decided: Railway + Postgres)
+## 6. Architecture and data storage (Decided: Railway + MySQL)
 
-House data moves to **Railway** with a real **Postgres** database. Michael already uses Railway for
+House data moves to **Railway** with a **MySQL** database. Michael already uses Railway for
 other projects. This replaces the earlier plan of a private GitHub repo with a token pasted on each device.
 
 ### Pieces
@@ -152,7 +152,7 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
         │  session cookie                 │  bot API key                    │  upload token
         ▼                                 ▼                                 ▼
  ┌──────────────────────────── Railway project "house-planner" ─────────────────────────────┐
- │  web+api service (Node + TypeScript, Hono)  ──►  Postgres  (house, workspaces, proposals) │
+ │  web+api service (Node + TypeScript, Hono)  ──►  MySQL     (house, workspaces, proposals) │
  │        serves the static editor + /api/*    ──►  Bucket    (scans, photos)                │
  └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -171,7 +171,7 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
   web standards (Request/Response), and runs well on Node on Railway. It has built-in middleware for
   cookies, CORS, and bearer auth, and a small dependency footprint suits an API with about a dozen
   routes. Fastify is a fine alternative with a bigger plugin ecosystem, but we don't need it here. Database access
-  goes through **Drizzle** (typed SQL with plain migration files) on the `pg` driver.
+  goes through **Prisma** (see ORM below).
 
 - **Login (single user): passkeys.** Michael signs in with Face ID / Touch ID. Passkeys sync through
   iCloud Keychain, so iPhone and Mac both work with no passwords and no email service. The server
@@ -189,42 +189,94 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
   tied to one service, lets the App Clip and browser upload directly with presigned URLs, and egress
   is free. A volume would pin storage to one service and make redeploys and backups clumsier.
 
-### Database schema (sketch)
+### Database schema (MySQL, fully relational)
 
-Plain columns for things we filter, join, or total on. **JSONB** for nested geometry and diffs
-that are always read and written as a whole (wall polylines, opening details, proposal change
-lists). That keeps the schema small while the geometry format is still changing, and Postgres can
-still index into JSONB if needed.
+**Approach:** model-based and normalized. Every entity is its own table with a primary key and
+foreign keys. There are **no JSON columns**: geometry, proposal changes, history, and costs are all
+rows and typed columns.
+Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 
-| Table | Key columns | Notes |
+**How geometry is modeled relationally**
+
+- **Units:** all lengths are stored as **integer inches**. 12 ft = 144, 13 ft = 156, 9 ft = 108.
+  That avoids floating-point drift, and 1" is finer than we can measure. The UI shows feet and inches.
+- **Rooms** have a position and rotation in the house plan (`origin_x_in`, `origin_y_in`,
+  `rotation_deg`) and a ceiling height. Each room's walls use room-local coordinates, so moving or
+  rotating a room when stitching only changes three columns.
+- **Walls** are rows with start and end points: `start_x_in, start_y_in, end_x_in, end_y_in`, plus
+  `height_in` and `thickness_in`. Length is computed. A wall-length edit moves an endpoint. An
+  **open edge** (like the family room's open right side) is a wall row with `is_open = 1`, so the
+  room outline is always closed and rooms can be stitched along it.
+- **Openings** reference a wall: `wall_id`, `type` (window/door/open_span/fireplace),
+  `offset_in` (from the wall's start point), `width_in`, `sill_in`, `head_in`. Moving a window is
+  one column update. Deleting a wall cascades to its openings.
+- **Furniture placements** store `x_in, y_in` (center, room-local), `rotation_deg`, and `room_id`.
+  Sizes come from the furniture item.
+
+**Tables**
+
+| Table | Columns (FK → table) | Notes |
 |---|---|---|
-| `houses` | id, name, units, current_revision | One row for now. |
-| `rooms` | id, house_id, slug, label, origin_x, origin_z, rotation, ceiling_ft, floor (jsonb), wall_color, trim_color | Part of Current. |
-| `walls` | id, room_id, a (jsonb `[x,z]`), b (jsonb), height_ft | Rows, so one wall can be edited or referenced alone. |
-| `openings` | id, room_id, wall_id (null for open edges), type (window/door/open/fireplace), offset_ft, width_ft, sill_ft, head_ft, details (jsonb) | `details` holds the treatment (e.g. blinds) and notes. |
-| `fixtures` | id, room_id, type, name, color, position (jsonb), details (jsonb) | Fan, outlets, blinds. |
-| `workspaces` | id, house_id, name, rooms (text[]), base = 'current', base_revision, structure_overrides (jsonb), colors (jsonb), notes, source (jsonb), revision | Base is always Current. `base_revision` shows which Current it was last reconciled with. |
-| `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store, url, price, image_url, status, notion_page_id, is_existing | The catalog. Current's furniture is items with `is_existing = true`. |
-| `placements` | id, workspace_id (null = Current), room_id, item_id, x, z, rot, action (keep/replace/remove/new), replaces_item_id | Keep/replace/remove decisions live here. |
-| `proposals` | id, house_id, created_at, actor, source (jsonb: kind, url, image), target_workspace_id (null = new), target_rooms, title, rationale, diff (jsonb), cost_low, cost_high, status (proposed/approved/rejected/applied), decided_at, decision_note, base_revision | `diff` is a list of `{op, path, before, after}`. |
-| `revisions` | id, house_id, scope ('current' or workspace id), number, actor, kind (save/proposal/rescan/rollback), proposal_id, patch (jsonb), inverse (jsonb), snapshot (jsonb, every Nth), created_at | **Append-only.** Never updated or deleted. |
-| `cost_estimates` | id, workspace_id, total_low, total_high, computed_at | Recomputed on change. |
-| `cost_steps` | id, estimate_id, step (paint/outlets/lighting/window/furniture/rug/decor/other), changes, low, high, items (jsonb) | One row per step. |
-| `uploads` | id, house_id, room_id, kind (scan/photo), format (usdz/glb/roomplan-json/jpg), bucket_key, bytes, status (uploaded/imported/rejected), created_at | Scans and photos in the bucket. |
-| `inspiration` | id, x_post_id, url, author, text, media (jsonb), rooms, classified_at, proposal_id | One row per X bookmark the routine handled. |
-| `sessions`, `passkeys` | the usual | Auth. |
+| `houses` | id, name, current_revision | One row for now. |
+| `rooms` | id, house_id → houses, slug, label, origin_x_in, origin_y_in, rotation_deg, ceiling_in, floor_material, floor_color, wall_color, trim_color | Structure for Current. |
+| `walls` | id, room_id → rooms, start_x_in, start_y_in, end_x_in, end_y_in, height_in, thickness_in, is_open, label | |
+| `openings` | id, wall_id → walls, type, offset_in, width_in, sill_in, head_in, treatment, notes | Treatment examples: "white horizontal blinds". |
+| `fixtures` | id, room_id → rooms, type (ceiling_fan/outlet/switch/light), name, color, x_in, y_in, wall_id → walls (nullable), count | Fan, outlets, switch plates. |
+| `room_links` | id, wall_a_id → walls, wall_b_id → walls, offset_in | Records that two rooms meet along these walls (stitching). |
+| `workspaces` | id, house_id → houses, name, notes, base_revision, revision, created_by (michael/bot), source_proposal_id → proposals (nullable) | Base is always Current. `base_revision` = the Current revision it was last reconciled with. |
+| `workspace_rooms` | workspace_id → workspaces, room_id → rooms | Which rooms a workspace covers (many-to-many). |
+| `workspace_room_styles` | workspace_id, room_id, wall_color, trim_color, floor_color | Per-design color overrides. Missing = same as Current. |
+| `structure_overrides` | id, workspace_id, entity_type (wall/opening), entity_id (nullable for added), field, value | Optional "what if" structure edits inside a design (P3+). |
+| `stores` | id, name, url, notes | Filled in after the store research. |
+| `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store_id → stores, url, price_cents, image_url, status (idea/shortlisted/bought/existing), notion_page_id | The catalog. Current's furniture is items with status `existing`. |
+| `placements` | id, workspace_id → workspaces (NULL = Current), room_id → rooms, item_id → furniture_items, x_in, y_in, rotation_deg, action (keep/replace/remove/new), replaces_placement_id → placements | Keep/replace/remove decisions on Current's pieces live here. |
+| `proposals` | id, house_id, created_at, created_by, source_kind (x_bookmark/bot/manual), source_url, source_image_url, inspiration_id → inspiration, target_workspace_id → workspaces (NULL = new), new_workspace_name, title, rationale, cost_low_cents, cost_high_cents, status (proposed/approved/rejected/applied), decided_at, decision_note, base_revision | |
+| `proposal_rooms` | proposal_id, room_id | Target room(s). |
+| `proposal_changes` | id, proposal_id → proposals, seq, op (create/update/delete), entity_type (placement/opening/wall/room_style/…), entity_id (NULL for create), field, before_value, after_value, temp_ref | **One row per field change.** A new piece is one `create` with a `temp_ref` plus one row per field. |
+| `revisions` | id, house_id, workspace_id (NULL = Current), number, created_at, actor (michael/bot), kind (save/proposal/rescan/rollback/seed), proposal_id → proposals, rolls_back_revision_id → revisions, note | **Append-only.** Unique (workspace_id, number). |
+| `revision_changes` | id, revision_id → revisions, seq, op, entity_type, entity_id, field, before_value, after_value | Same shape as `proposal_changes`. Append-only. |
+| `cost_estimates` | id, workspace_id → workspaces, total_low_cents, total_high_cents, computed_at, revision | Latest estimate per design. |
+| `cost_steps` | id, estimate_id → cost_estimates, step (paint/outlets/lighting/window/furniture/rug/decor/other), sort, changes_text, low_cents, high_cents | One row per step. |
+| `cost_step_items` | id, step_id → cost_steps, placement_id → placements (nullable), item_id → furniture_items (nullable), label, low_cents, high_cents | Line items. Kept pieces = 0. |
+| `uploads` | id, house_id, room_id → rooms, kind (scan/photo), format (usdz/glb/roomplan_json/jpg/heic), bucket_key, bytes, status (uploaded/imported/rejected), uploaded_by, created_at | Files live in the bucket. The DB holds the key. |
+| `inspiration` | id, x_post_id (unique), url, author_handle, post_text, bookmarked_at, classified_at, is_design | One row per X bookmark the routine handled. |
+| `inspiration_media` | id, inspiration_id → inspiration, url, type | Images and video on the post. |
+| `inspiration_rooms` | inspiration_id, room_id | The room(s) it was matched to. |
+| `users`, `passkeys`, `sessions`, `upload_tokens` | the usual | Auth. One user. |
+
+`before_value` / `after_value` are `VARCHAR` holding the field's value as text (a number of inches,
+a hex color, an id, an enum). Each change row names its entity type and field, so the server
+converts the value back to the column's real type when applying it. That keeps diffs and history
+relational (one row per changed field, queryable: "every change to the sofa's position") without
+a JSON column.
+
+### ORM: Prisma
+
+**Prisma** (with Prisma Migrate) on MySQL. The schema is a single declarative `schema.prisma` file
+with models and relations, which fits the model-based design. Prisma Migrate generates SQL
+migration files from model changes, and the generated client gives typed queries and nested
+relation reads like "workspace with rooms, placements, and items". Its MySQL support is mature
+and widely used. Drizzle was the alternative (lighter, closer to SQL). It's a good tool, but
+Prisma's model-first schema and migration workflow match "model-based, fully relational" more
+directly, and it's the easier one to read and maintain.
 
 ### Version history and rollback (append-only revisions)
 
-- Every change to Current or a workspace runs in one transaction. It applies the change, bumps that
-  scope's `revision` number, and inserts a `revisions` row with the forward `patch` and its `inverse`.
-  Every 20th revision also stores a full `snapshot`.
-- **History list:** read `revisions` for a workspace, newest first, with who (Michael / bot via
-  approved proposal) and why.
-- **Undo one change:** apply its `inverse` as a new revision (`kind = 'rollback'`). It's refused, and
-  shown as a conflict, if a later revision touched the same paths.
-- **Restore to a point:** load the nearest snapshot, replay patches up to that revision, and write the
-  result as one new revision. Nothing is ever deleted, so a rollback can itself be rolled back.
+- Every change to Current or a workspace is one transaction. It applies the field changes, bumps
+  that scope's `revision` number, and inserts one `revisions` row plus one `revision_changes` row per
+  changed field, with before and after values. Creates and deletes record every field of the row,
+  so they can be reversed.
+- **Approving a proposal** copies its `proposal_changes` into a new revision (`kind = 'proposal'`,
+  linked by `proposal_id`) and marks the proposal `applied`.
+- **History list:** read `revisions` for a workspace, newest first, with who did it (Michael, or the
+  bot via an approved proposal) and why.
+- **Undo one change:** build a new revision (`kind = 'rollback'`, `rolls_back_revision_id` set) whose
+  changes are the original's rows reversed: swap before and after, create ↔ delete, applied in reverse
+  `seq` order. It's refused, and shown as a conflict, if a later revision changed the same
+  entity and field.
+- **Restore to a point:** walk the revisions after that point from newest to oldest, collecting their
+  reversed changes, and apply them as **one** new rollback revision. Nothing is ever updated or
+  deleted in `revisions` / `revision_changes`, so a rollback can itself be rolled back.
 
 ### Phone / laptop sync
 
@@ -258,13 +310,13 @@ workspace with $20 included.
 | Item | Rough monthly use | Est. cost |
 |---|---|---|
 | Web+API service (idle most of the day, ~100–150 MB RAM) | | $1 – $2 |
-| Postgres (~200–300 MB RAM, ~1 GB disk) | | $2 – $3.50 |
+| MySQL (~300–450 MB RAM, ~1 GB disk) | | $3 – $4.50 |
 | Bucket (a few GB of scans and photos) | | < $0.10 |
-| **Usage total** | | **≈ $3 – $6 / month** |
+| **Usage total** | | **≈ $4 – $7 / month** |
 
-On Hobby that's mostly covered by the $5 included, so about **$5–7/month all-in**. If it goes in
+On Hobby that's mostly covered by the $5 included, so about **$5–8/month all-in**. If it goes in
 Michael's existing Railway workspace, it shares that plan's included credit with his other projects, so
-the extra cost is just the usage, about $3–6. *These are estimates. Actual cost depends on RAM use,
+the extra cost is just the usage, about $4–7. *These are estimates. Actual cost depends on RAM use,
 which we'll check after P0.*
 
 ---
@@ -279,7 +331,7 @@ by approving them. The bot's API key can create proposals but can't approve them
 
 - **Source:** link to the X post or other origin, plus an image if there is one
 - **Target:** room(s) and workspace, or "new workspace" with a suggested name
-- **Changes (diff):** a list of specific edits with **before / after** values (move this piece,
+- **Changes:** `proposal_changes` rows, one per changed field, with **before / after** values (move this piece,
   replace that one, change wall color, add an item). It's precise enough to apply automatically.
 - **Rationale:** why it fits the room and the design style
 - **Cost impact:** the change to that design's cost-to-change total (low/high)
@@ -292,7 +344,7 @@ by approving them. The bot's API key can create proposals but can't approve them
 - Opening one shows a **visual before/after in split view**: the workspace as it is on the left
   and the workspace with the proposal applied on the right, with camera sync on. The change list,
   rationale, and cost impact are shown underneath.
-- **Approve** applies the diff to the workspace as a new revision. For "new workspace," it creates the
+- **Approve** applies the changes to the workspace as a new revision. For "new workspace," it creates the
   workspace from Current plus the changes. **Reject** keeps the proposal with status `rejected` and an
   optional reason, so the bot learns what you don't want.
 - If the workspace changed since the proposal was written (its `base_revision` is behind) and a
@@ -373,11 +425,12 @@ Changes from the last version:
 - **Cost-to-change estimates ship with shopping lists in P4.**
 
 ### P0: Railway setup
-- Railway project with Postgres and a bucket. One Hono (TypeScript) service that serves the static
+- Railway project with MySQL and a bucket. One Hono (TypeScript) service that serves the static
   editor and `/api/*`. Deploys automatically from the repo's `main` branch.
-- Drizzle schema and migrations for the tables in section 6.
+- Prisma schema and migrations for the tables in section 6.
 - Passkey login with a one-time setup code and recovery codes. Session cookie. `BOT_API_KEY` for the bot.
-- Seed migration: import `tmbradley/house-data/house.json` (the family room as Current, with existing furniture).
+- Seed script: import `tmbradley/house-data/house.json` into the relational tables, converting feet to
+  integer inches (the family room as Current, with existing furniture). Recorded as revision 1 (`kind = 'seed'`).
 - Health check and a nightly JSON export (to the bucket, and optionally committed to `house-data`).
 
 **Done when:** the editor loads from the Railway URL, you can sign in with Face ID on the iPhone and
@@ -460,7 +513,7 @@ appears in the editor ready to confirm, with no manual file transfer.
 
 ## 11. Open questions for Michael
 
-Answered and folded in: storage (Railway + Postgres), room order (decide as we go), existing
+Answered and folded in: storage (Railway + MySQL, fully relational), room order (decide as we go), existing
 furniture in Current (yes, with keep / replace / remove), budget (none yet, so cost-to-change
 estimates instead), stores (bot researches them), and bot edits (proposals only).
 
@@ -470,7 +523,7 @@ Still open:
    sectional (both arms), the swivel chair, the rug, and the two TVs? And which wall are the TVs on?
 2. Do you want to approve proposals from your phone as often as from the laptop? If so, the
    Proposals panel gets designed phone-first.
-3. **Furniture: Notion or Postgres?** My recommendation is **Postgres as the source of truth**, edited in
+3. **Furniture: Notion or MySQL?** My recommendation is **MySQL as the source of truth**, edited in
    the planner, with Notion as an optional one-way view if you like browsing there. That gives one
    place for prices and shopping lists and avoids two-way sync conflicts. The personal Notion
    connection also still points at the wrong workspace. Or would you rather keep editing furniture in
