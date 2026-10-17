@@ -259,14 +259,44 @@ app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
 // MCP
 app.all('/mcp', (c) => handleMcp(c.req.raw));
 
-// Apple App Site Association for App Clip
+// Apple App Site Association for App Clip (generated dynamically with APPLE_TEAM_ID)
+const getAppleAppSiteAssociation = () => {
+  const teamId = process.env.APPLE_TEAM_ID;
+  if (!teamId) {
+    return { error: 'APPLE_TEAM_ID environment variable not set' };
+  }
+  
+  return {
+    appclips: {
+      apps: [`${teamId}.com.michaelbradley.houseplanner.clip`],
+    },
+    applinks: {
+      details: [
+        {
+          appIDs: [`${teamId}.com.michaelbradley.houseplanner.clip`],
+          components: [
+            {
+              '/': '/scan',
+              '?': {
+                token: '?*',
+              },
+            },
+          ],
+        },
+      ],
+    },
+  };
+};
+
 app.get('/.well-known/apple-app-site-association', (c) => {
   c.header('Content-Type', 'application/json');
-  return c.body(require('fs').readFileSync('./server/public/apple-app-site-association', 'utf-8'));
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.json(getAppleAppSiteAssociation());
 });
 app.get('/apple-app-site-association', (c) => {
   c.header('Content-Type', 'application/json');
-  return c.body(require('fs').readFileSync('./server/public/apple-app-site-association', 'utf-8'));
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.json(getAppleAppSiteAssociation());
 });
 
 // Pages

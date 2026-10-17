@@ -12,15 +12,31 @@ This directory contains the iOS app with an App Clip for scanning rooms using Li
 
 - `HousePlanner/` - Parent iOS app (minimal, required for App Clip)
 - `HousePlannerClip/` - App Clip for room scanning
-- `HousePlanner.xcodeproj` - Xcode project file
+- `HousePlanner.xcodeproj` - Xcode project file (hand-written)
+- `project.yml` - XcodeGen spec (fallback, more reliable)
 
 ## Setup Instructions
 
 ### 1. Open the Project in Xcode
 
+**Option A: Use the hand-written project (try this first)**
+
 ```bash
 open ios/HousePlanner.xcodeproj
 ```
+
+If Xcode shows errors opening the project, use Option B.
+
+**Option B: Generate from XcodeGen spec (more reliable)**
+
+```bash
+cd ios
+brew install xcodegen  # One-time install
+xcodegen generate
+open HousePlanner.xcodeproj
+```
+
+The `project.yml` spec is checked in and generates the same project structure.
 
 ### 2. Configure Code Signing
 

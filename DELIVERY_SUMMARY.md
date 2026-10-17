@@ -178,23 +178,32 @@ git commit -am "Update Team ID"
 git push
 ```
 
-### Step 2: Merge the PR
+### Step 2: Merge and Deploy
 
-Review and merge [PR #1](https://github.com/tmbradley/family-room-3d/pull/1).
+1. **Merge** [PR #1](https://github.com/tmbradley/family-room-3d/pull/1) to `main`
 
-Railway will:
-- Auto-deploy to production
-- Run the migration (creates new tables)
-- Start serving new endpoints
+2. **Deploy to Railway** from your local checkout:
+   ```bash
+   git checkout main
+   git pull
+   railway up
+   ```
 
-Verify:
-```bash
-curl https://app-production-1828.up.railway.app/health
-# Should show "ok": true, "houses": 1
+   This will:
+   - Deploy to production
+   - Run the migration (creates new tables)
+   - Start serving new endpoints
 
-curl https://app-production-1828.up.railway.app/.well-known/apple-app-site-association
-# Should return App Clip config
-```
+3. **Verify deployment**:
+   ```bash
+   curl https://app-production-1828.up.railway.app/health
+   # Should show "ok": true, "houses": 1
+
+   curl https://app-production-1828.up.railway.app/.well-known/apple-app-site-association
+   # Should return App Clip config with your Team ID
+   ```
+
+**Note:** Railway does NOT auto-deploy from GitHub. You must run `railway up` after merging.
 
 ### Step 3: Set Up iOS in Xcode
 

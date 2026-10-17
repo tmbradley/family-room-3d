@@ -497,6 +497,7 @@ $('btnNew').onclick = (e) => { e.stopPropagation(); renderNewMenu(); $('newMenu'
 document.addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) $('newMenu').hidden = true; });
 $('btnProposals').onclick = () => openDrawer('proposals');
 $('btnHistory').onclick = () => openDrawer('history');
+$('btnPairPhone').onclick = showPairDialog;
 $('drawerClose').onclick = () => openDrawer(state.drawer);
 $('propFilter').onchange = renderProposals;
 $('btnExport').onclick = () => {
@@ -548,6 +549,196 @@ async function boot() {
   if (params.get('drawer')) openDrawer(params.get('drawer'));
   flushDrafts();
 }
+
+// ---------------------------------------------------------------------------
+// Pairing and scans
+// ---------------------------------------------------------------------------
+async function showPairDialog() {
+  try {
+    const res = await api.generateUploadToken();
+    const url = `${location.origin}/scan?token=${res.token}`;
+    const qr = await generateQR(url);
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `
+      <div class="modal-content">
+        <h2>Pair Phone to Scan</h2>
+        <p>On your iPhone, scan this QR code or open the link:</p>
+        <div style="text-align: center; margin: 20px 0;">
+          <img src="${qr}" alt="QR code" style="width: 256px; height: 256px; border: 1px solid #ccc;">
+        </div>
+        <div class="code-box">${res.token}</div>
+        <p class="small">Token expires: ${new Date(res.expiresAt).toLocaleString()}</p>
+        <div class="row">
+          <button id="copyLink" class="secondary">Copy Link</button>
+          <button id="closePair">Done</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    modal.querySelector('#copyLink').onclick = () => {
+      navigator.clipboard.writeText(url);
+      toast('Link copied to clipboard');
+    };
+    modal.querySelector('#closePair').onclick = () => {
+      document.body.removeChild(modal);
+      refreshScans();
+    };
+    modal.onclick = (e) => {
+      if (e.target === modal) document.body.removeChild(modal);
+    };
+  } catch (e) {
+    toast(`Failed to generate token: ${errMsg(e)}`, true);
+  }
+}
+
+async function generateQR(text) {
+  const QRCode = await import('https://cdn.jsdelivr.net/npm/qrcode@1.5.3/+esm');
+  return await QRCode.toDataURL(text, { width: 256, margin: 1 });
+}
+
+async function refreshScans() {
+  try {
+    const scans = await api.scans();
+    const pending = scans.filter(s => s.status === 'pending');
+    const el = $('scanImports');
+    
+    if (!pending.length) {
+      el.innerHTML = '<div class="muted">No pending scans</div>';
+      return;
+    }
+    
+    el.innerHTML = pending.map(s => `
+      <div class="scan-item" data-id="${s.id}">
+        <strong>${esc(s.label || 'Scanned Room')}</strong>
+        <div class="small muted">${when(s.createdAt)}</div>
+        <div class="row">
+          <button class="small review-scan" data-id="${s.id}">Review</button>
+          <button class="small danger reject-scan" data-id="${s.id}">Reject</button>
+        </div>
+      </div>
+    `).join('');
+    
+    el.querySelectorAll('.review-scan').forEach(btn => {
+      btn.onclick = () => reviewScan(Number(btn.dataset.id));
+    });
+    el.querySelectorAll('.reject-scan').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Reject this scan?')) return;
+        try {
+          await api.rejectScan(Number(btn.dataset.id));
+          toast('Scan rejected');
+          refreshScans();
+        } catch (e) {
+          toast(`Failed to reject: ${errMsg(e)}`, true);
+        }
+      };
+    });
+  } catch (e) {
+    console.error('Failed to refresh scans:', e);
+  }
+}
+
+async function reviewScan(scanId) {
+  try {
+    const scan = await api.scan(scanId);
+    
+    // Convert parsed data to workspace format for display
+    const scanData = convertScanToWorkspace(scan);
+    const key = `scan:${scanId}`;
+    state.cache.set(key, scanData);
+    
+    if (state.panes.length === 1) split();
+    await show(state.focused, key);
+    
+    // Show review drawer
+    showScanDrawer(scan);
+  } catch (e) {
+    toast(`Failed to load scan: ${errMsg(e)}`, true);
+  }
+}
+
+function convertScanToWorkspace(scan) {
+  const room = scan.parsedData.room?.[0] || {};
+  const walls = Object.entries(scan.parsedData.wall || {}).map(([idx, w]) => ({
+    id: `wall-${idx}`,
+    startXIn: Number(w.startXIn),
+    startYIn: Number(w.startYIn),
+    endXIn: Number(w.endXIn),
+    endYIn: Number(w.endYIn),
+    heightIn: Number(w.heightIn),
+    thicknessIn: Number(w.thicknessIn || 5),
+    label: null,
+  }));
+  
+  return {
+    id: `scan-${scan.id}`,
+    name: scan.label || 'Scanned Room',
+    rooms: [{
+      id: `scan-room-${scan.id}`,
+      slug: 'scanned',
+      label: scan.label || 'Scanned Room',
+      ceilingIn: Number(room.ceilingIn || 108),
+      walls,
+      openings: [],
+      fixtures: [],
+      placements: [],
+    }],
+  };
+}
+
+function showScanDrawer(scan) {
+  state.drawer = 'scan';
+  $('drawerTitle').textContent = 'Review Scan';
+  const body = $('drawerBody');
+  
+  const room = scan.parsedData.room?.[0] || {};
+  body.innerHTML = `
+    <div class="card">
+      <h3>${esc(scan.label || 'Scanned Room')}</h3>
+      <p class="small muted">Scanned: ${when(scan.createdAt)}</p>
+      
+      <h4>Dimensions</h4>
+      <div class="small">
+        Width: ${fmtIn(Number(room.widthIn || 0))}<br>
+        Depth: ${fmtIn(Number(room.depthIn || 0))}<br>
+        Ceiling: ${fmtIn(Number(room.ceilingIn || 0))}
+      </div>
+      
+      <h4>Detected</h4>
+      <div class="small">
+        Walls: ${Object.keys(scan.parsedData.wall || {}).length}<br>
+        Openings: ${Object.keys(scan.parsedData.opening || {}).length}<br>
+        Objects: ${Object.keys(scan.parsedData.object || {}).length}
+      </div>
+      
+      <p class="small">Review the geometry in the 3D view. You can adjust before promoting.</p>
+      
+      <div class="row">
+        <button id="promoteScanBtn" class="primary">Promote to Current</button>
+      </div>
+    </div>
+  `;
+  
+  body.querySelector('#promoteScanBtn').onclick = async () => {
+    if (!confirm('Promote this scan to Current? This will create the locked Current room.')) return;
+    try {
+      await api.promoteScan(scan.id);
+      toast('Scan promoted to Current! Refreshing...');
+      closeDrawer();
+      await refreshList();
+      await refreshScans();
+      renderTabs();
+    } catch (e) {
+      toast(`Failed to promote: ${errMsg(e)}`, true);
+    }
+  };
+  
+  openDrawer();
+}
+
 async function openDrawerSilently() { state.proposals = await api.proposals(); }
 boot();
 

@@ -11,9 +11,9 @@ The room scanning feature allows you to:
 4. Upload everything to the server
 5. Review and promote the scan to become Current
 
-## Server Setup (Already Done)
+## Server Setup
 
-The server changes have been deployed to Railway:
+The server changes are ready to deploy to Railway:
 - ✅ Database migration for scan imports
 - ✅ Upload token endpoints
 - ✅ Presigned S3 upload URLs
@@ -21,7 +21,15 @@ The server changes have been deployed to Railway:
 - ✅ Scan import management endpoints
 - ✅ Apple App Site Association file
 
-## iOS Setup (To Do)
+**Note:** Railway deployment requires running `railway up` from a local checkout. It does NOT auto-deploy from GitHub. After merging this PR, run:
+
+```bash
+git checkout main
+git pull
+railway up  # Deploys to Railway
+```
+
+## iOS Setup (After Server is Deployed)
 
 ### Step 1: Open the Project
 

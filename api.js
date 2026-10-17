@@ -27,4 +27,10 @@ export const api = {
   reject: (id, note) => req('POST', `/api/proposals/${id}/reject`, { note }),
   measure: (body) => req('POST', '/api/measurements', body),
   unpin: (body) => req('POST', '/api/measurements/unpin', body),
+  generateUploadToken: (roomId) => req('POST', '/api/upload-tokens', { roomId }),
+  scans: (status) => req('GET', `/api/scans${status ? `?status=${status}` : ''}`),
+  scan: (id) => req('GET', `/api/scans/${id}`),
+  promoteScan: (id) => req('POST', `/api/scans/${id}/promote`),
+  rejectScan: (id, notes) => req('POST', `/api/scans/${id}/reject`, { notes }),
+  exportHouse: () => req('GET', '/api/export'),
 };

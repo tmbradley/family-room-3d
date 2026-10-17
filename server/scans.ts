@@ -321,38 +321,253 @@ export async function listScanImports(houseId: number, status?: 'pending' | 'pro
  * Creates the room structure with measurement source 'scan'.
  * Respects pinned manual measurements.
  */
-export async function promoteScanImport(scanImportId: number, actor: 'michael' | 'agent' = 'michael') {
-  const scanImport = await getScanImport(scanImportId);
+export async function promoteScanImport(
+  scanImportId: number,
+  actor: 'michael' | 'agent' = 'michael',
+  tx?: any
+) {
+  const doPromotion = async (prisma: any) => {
+    const scanImport = await prisma.scanImport.findUnique({
+      where: { id: scanImportId },
+      include: {
+        house: true,
+        data: { orderBy: [{ entityType: 'asc' }, { entityIndex: 'asc' }, { field: 'asc' }] },
+      },
+    });
 
-  if (scanImport.status !== 'pending') {
-    throw new ApiError(400, 'already_processed', 'Scan import has already been promoted or rejected');
+    if (!scanImport) {
+      throw new ApiError(404, 'not_found', 'Scan import not found');
+    }
+
+    if (scanImport.status !== 'pending') {
+      throw new ApiError(400, 'already_processed', 'Scan import has already been promoted or rejected');
+    }
+
+    const { parsedData } = reconstructParsedData(scanImport.data);
+    const roomData = parsedData.room?.[0];
+
+    if (!roomData) {
+      throw new ApiError(400, 'invalid_data', 'No room data found in scan import');
+    }
+
+    // Get existing pinned measurements
+    const pinnedMeasurements = await prisma.measurement.findMany({
+      where: {
+        source: 'manual',
+        isOverride: true,
+        unpinnedAt: null,
+      },
+    });
+
+    const pinnedMap = new Map<string, number>();
+    for (const m of pinnedMeasurements) {
+      pinnedMap.set(`${m.entityType}:${m.entityId}:${m.field}`, m.valueIn);
+    }
+
+    // Create or update the Current room
+    const slug = 'family-room';
+    let room = await prisma.room.findFirst({
+      where: {
+        houseId: scanImport.houseId,
+        slug,
+        draftWorkspaceId: null, // Current room
+      },
+    });
+
+    if (!room) {
+      // Create new Current room
+      room = await prisma.room.create({
+        data: {
+          houseId: scanImport.houseId,
+          slug,
+          label: roomData.label || 'Family Room',
+          ceilingIn: Number(roomData.ceilingIn),
+          floorMaterial: 'hardwood',
+          floorFinish: 'honey oak',
+          floorKeep: true,
+          measurementStatus: 'scan',
+        },
+      });
+    } else {
+      // Update existing room
+      await prisma.room.update({
+        where: { id: room.id },
+        data: {
+          label: roomData.label,
+          ceilingIn: pinnedMap.get(`room:${room.id}:ceilingIn`) ?? Number(roomData.ceilingIn),
+          measurementStatus: 'scan',
+        },
+      });
+    }
+
+    // Record room measurements
+    await recordMeasurementIfNotPinned(prisma, {
+      entityType: 'room',
+      entityId: room.id,
+      field: 'ceilingIn',
+      valueIn: Number(roomData.ceilingIn),
+      source: 'scan',
+      uploadId: scanImport.uploadId,
+      actor,
+    }, pinnedMap);
+
+    // Delete existing walls and recreate from scan
+    await prisma.wall.deleteMany({ where: { roomId: room.id } });
+
+    // Create walls
+    const wallMap = new Map<number, number>(); // entityIndex -> wall.id
+    for (const [indexStr, wallData] of Object.entries(parsedData.wall || {})) {
+      const index = Number(indexStr);
+      const wall = await prisma.wall.create({
+        data: {
+          roomId: room.id,
+          startXIn: Number(wallData.startXIn),
+          startYIn: Number(wallData.startYIn),
+          endXIn: Number(wallData.endXIn),
+          endYIn: Number(wallData.endYIn),
+          heightIn: Number(wallData.heightIn),
+          thicknessIn: Number(wallData.thicknessIn || 5),
+          measurementStatus: 'scan',
+        },
+      });
+      wallMap.set(index, wall.id);
+
+      // Record wall measurements
+      for (const field of ['startXIn', 'startYIn', 'endXIn', 'endYIn', 'heightIn']) {
+        await recordMeasurementIfNotPinned(prisma, {
+          entityType: 'wall',
+          entityId: wall.id,
+          field,
+          valueIn: Number(wallData[field]),
+          source: 'scan',
+          uploadId: scanImport.uploadId,
+          actor,
+        }, pinnedMap);
+      }
+    }
+
+    // Delete existing openings and recreate from scan
+    await prisma.opening.deleteMany({ where: { wall: { roomId: room.id } } });
+
+    // Create openings
+    for (const [, openingData] of Object.entries(parsedData.opening || {})) {
+      const wallIndex = Number(openingData.wallIndex);
+      const wallId = wallMap.get(wallIndex);
+      if (!wallId) continue;
+
+      const opening = await prisma.opening.create({
+        data: {
+          wallId,
+          type: openingData.type as any,
+          offsetIn: Number(openingData.offsetIn),
+          widthIn: Number(openingData.widthIn),
+          sillIn: Number(openingData.sillIn || 36),
+          headIn: Number(openingData.headIn || 84),
+          measurementStatus: 'scan',
+        },
+      });
+
+      // Record opening measurements
+      for (const field of ['offsetIn', 'widthIn', 'sillIn', 'headIn']) {
+        await recordMeasurementIfNotPinned(prisma, {
+          entityType: 'opening',
+          entityId: opening.id,
+          field,
+          valueIn: Number(openingData[field]),
+          source: 'scan',
+          uploadId: scanImport.uploadId,
+          actor,
+        }, pinnedMap);
+      }
+    }
+
+    // Create revision
+    const house = await prisma.house.findUnique({ where: { id: scanImport.houseId } });
+    const revisionNumber = (house?.currentRevision || 0) + 1;
+
+    const revision = await prisma.revision.create({
+      data: {
+        houseId: scanImport.houseId,
+        workspaceId: null,
+        scope: 'current',
+        number: revisionNumber,
+        actor,
+        kind: 'rescan',
+        note: `Promoted scan import: ${roomData.label}`,
+      },
+    });
+
+    // Update house's currentRevision
+    await prisma.house.update({
+      where: { id: scanImport.houseId },
+      data: { currentRevision: revision.id },
+    });
+
+    // Mark scan import as promoted
+    await prisma.scanImport.update({
+      where: { id: scanImportId },
+      data: {
+        status: 'promoted',
+        promotedAt: new Date(),
+        promotedBy: actor,
+        roomId: room.id,
+      },
+    });
+
+    return { success: true, roomId: room.id, revisionId: revision.id };
+  };
+
+  if (tx) {
+    return await doPromotion(tx);
+  } else {
+    return await prisma.$transaction(async (t) => doPromotion(t), { timeout: 30_000 });
   }
+}
 
-  const { parsedData } = scanImport;
-  const roomData = parsedData.room?.[0];
+async function recordMeasurementIfNotPinned(
+  prisma: any,
+  params: {
+    entityType: string;
+    entityId: number;
+    field: string;
+    valueIn: number;
+    source: string;
+    uploadId: number;
+    actor: 'michael' | 'agent' | 'system';
+  },
+  pinnedMap: Map<string, number>
+) {
+  const key = `${params.entityType}:${params.entityId}:${params.field}`;
+  const pinnedValue = pinnedMap.get(key);
 
-  if (!roomData) {
-    throw new ApiError(400, 'invalid_data', 'No room data found in scan import');
-  }
-
-  // TODO: Implement the full promotion logic that:
-  // 1. Creates or updates the Current room with the scanned data
-  // 2. Checks for pinned manual measurements and preserves them
-  // 3. Records all measurements with source='scan'
-  // 4. Creates a revision for the change
-  // 5. Updates the house's currentRevision if this is the first Current
-
-  // For now, mark as promoted
-  await prisma.scanImport.update({
-    where: { id: scanImportId },
+  await prisma.measurement.create({
     data: {
-      status: 'promoted',
-      promotedAt: new Date(),
-      promotedBy: actor,
+      entityType: params.entityType,
+      entityId: params.entityId,
+      field: params.field,
+      valueIn: params.valueIn,
+      source: params.source as any,
+      uploadId: params.uploadId,
+      recordedBy: params.actor,
+      note: pinnedValue != null ? `Scan value: ${params.valueIn}, pinned value: ${pinnedValue} preserved` : null,
     },
   });
+}
 
-  return { success: true, message: 'Scan import promoted to Current' };
+function reconstructParsedData(data: any[]) {
+  const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
+  
+  for (const datum of data) {
+    if (!dataByEntity[datum.entityType]) {
+      dataByEntity[datum.entityType] = {};
+    }
+    if (!dataByEntity[datum.entityType][datum.entityIndex]) {
+      dataByEntity[datum.entityType][datum.entityIndex] = {};
+    }
+    dataByEntity[datum.entityType][datum.entityIndex][datum.field] = datum.value;
+  }
+
+  return { parsedData: dataByEntity };
 }
 
 /**
