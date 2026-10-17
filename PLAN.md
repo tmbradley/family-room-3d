@@ -506,6 +506,13 @@ Changes from the last version:
 - **Cost-to-change estimates ship with shopping lists in P4.**
 
 ### P0: Railway setup
+
+**Status (Oct 17, 2026):** deployed at <https://app-production-1828.up.railway.app> (Railway project
+`house-planner`). MySQL is migrated and seeded, and the bucket and nightly export are working. Passkey
+setup is waiting on Michael's first sign-in. Still to do: auto-deploy from GitHub (currently deployed
+with `railway up`), moving `railway.json` to Railway's newer `.railway/railway.ts` before 2026-12-01,
+and turning off Pages once confirmed.
+
 - A new Railway project (workspace chosen at setup) with MySQL and a bucket, on the default
   `*.up.railway.app` URL. One Hono (TypeScript) service that serves the static editor and `/api/*`.
   Deploys automatically from the repo's `main` branch.
