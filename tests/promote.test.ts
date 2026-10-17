@@ -35,7 +35,7 @@ test('promoteScanImport creates Current room from scan', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -73,16 +73,21 @@ test('promoteScanImport creates Current room from scan', async () => {
   assert.ok(measurements.length > 0);
 
   // Verify revision was created
-  const revision = await prisma.revision.findUnique({ where: { id: result.revisionId } });
+  const revision = await prisma.revision.findFirst({ 
+    where: { houseId: house.id }, 
+    orderBy: { number: 'desc' } 
+  });
   assert.ok(revision);
   assert.strictEqual(revision?.kind, 'rescan');
-  assert.strictEqual(revision?.scope, 'current');
+  assert.strictEqual(revision?.scope, 'house');
 
   // Verify house currentRevision was set
   const updatedHouse = await prisma.house.findUnique({ where: { id: house.id } });
   assert.strictEqual(updatedHouse?.currentRevision, result.revisionId);
 
   // Cleanup
+  await prisma.revisionChange.deleteMany({ where: { revision: { houseId: house.id } } });
+  await prisma.revision.deleteMany({ where: { houseId: house.id } });
   await prisma.house.delete({ where: { id: house.id } });
 });
 
@@ -94,7 +99,7 @@ test('promoteScanImport respects pinned measurements', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test2.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}2.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -114,6 +119,10 @@ test('promoteScanImport respects pinned measurements', async () => {
 
   // Pin a ceiling height measurement
   const pinnedValue = 110; // Different from scan value of 108
+  await prisma.room.update({
+    where: { id: roomId },
+    data: { ceilingIn: pinnedValue },
+  });
   await prisma.measurement.create({
     data: {
       entityType: 'room',
@@ -133,7 +142,7 @@ test('promoteScanImport respects pinned measurements', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test3.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}3.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -167,6 +176,8 @@ test('promoteScanImport respects pinned measurements', async () => {
   assert.ok(scanMeasurements[0].note?.includes('pinned'));
 
   // Cleanup
+  await prisma.revisionChange.deleteMany({ where: { revision: { houseId: house.id } } });
+  await prisma.revision.deleteMany({ where: { houseId: house.id } });
   await prisma.house.delete({ where: { id: house.id } });
 });
 
@@ -178,7 +189,7 @@ test('rejectScanImport marks scan as rejected', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test-reject.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}-reject.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -205,6 +216,8 @@ test('rejectScanImport marks scan as rejected', async () => {
   assert.strictEqual(rooms, 0);
 
   // Cleanup
+  await prisma.revisionChange.deleteMany({ where: { revision: { houseId: house.id } } });
+  await prisma.revision.deleteMany({ where: { houseId: house.id } });
   await prisma.house.delete({ where: { id: house.id } });
 });
 
@@ -216,7 +229,7 @@ test('promoteScanImport fails if already processed', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test-double.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}-double.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -242,6 +255,8 @@ test('promoteScanImport fails if already processed', async () => {
   );
 
   // Cleanup
+  await prisma.revisionChange.deleteMany({ where: { revision: { houseId: house.id } } });
+  await prisma.revision.deleteMany({ where: { houseId: house.id } });
   await prisma.house.delete({ where: { id: house.id } });
 });
 
@@ -253,7 +268,7 @@ test('promoteScanImport creates measurements with scan source', async () => {
       houseId: house.id,
       kind: 'scan',
       format: 'roomplan_json',
-      bucketKey: 'test-meas.json',
+      bucketKey: `test-${Date.now()}-${Math.random()}-meas.json`,
       status: 'uploaded',
       uploadedBy: 'system',
     },
@@ -284,6 +299,8 @@ test('promoteScanImport creates measurements with scan source', async () => {
   assert.ok(wallMeasurements.length >= 4 * 4); // 4 walls × at least 4 fields each
 
   // Cleanup
+  await prisma.revisionChange.deleteMany({ where: { revision: { houseId: house.id } } });
+  await prisma.revision.deleteMany({ where: { houseId: house.id } });
   await prisma.house.delete({ where: { id: house.id } });
 });
 

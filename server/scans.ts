@@ -1,7 +1,7 @@
 import { prisma } from './db.js';
 import { ApiError } from './util.js';
 import type { Prisma } from '@prisma/client';
-import { saveChanges, type Op } from './changes.js';
+import { saveChanges, saveChangesForRescan, type Op } from './changes.js';
 
 /**
  * Apple RoomPlan CapturedRoom structure (real format from JSONEncoder)
@@ -364,8 +364,8 @@ export async function promoteScanImport(
   actor: 'michael' | 'agent' = 'michael',
   tx?: any
 ) {
-  const doPromotion = async (prisma: any) => {
-    const scanImport = await prisma.scanImport.findUnique({
+  const doPromotion = async (tx: any) => {
+    const scanImport = await tx.scanImport.findUnique({
       where: { id: scanImportId },
       include: {
         house: true,
@@ -399,7 +399,7 @@ export async function promoteScanImport(
 
     const slug = roomData.label?.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'scanned-room';
     
-    let existingRoom = await prisma.room.findFirst({
+    const existingRoom = await tx.room.findFirst({
       where: {
         houseId: scanImport.houseId,
         slug,
@@ -411,10 +411,20 @@ export async function promoteScanImport(
     });
 
     const changes: Op[] = [];
+    const measurements: Array<{
+      entityType: string;
+      entityId?: number;
+      entityRef?: string;
+      field: string;
+      valueIn: number;
+    }> = [];
 
     if (!existingRoom) {
-      existingRoom = await prisma.room.create({
-        data: {
+      changes.push({
+        op: 'create',
+        entityType: 'room',
+        tempRef: 'room-1',
+        fields: {
           houseId: scanImport.houseId,
           slug,
           label: roomData.label,
@@ -425,24 +435,48 @@ export async function promoteScanImport(
           floorKeep: true,
           draftWorkspaceId: null,
         },
-        include: {
-          walls: { include: { openings: true } },
-        },
+      });
+      measurements.push({
+        entityType: 'room',
+        entityRef: 'room-1',
+        field: 'ceilingIn',
+        valueIn: Number(roomData.ceilingIn),
       });
     } else {
+      const ceilingPin = await tx.measurement.findFirst({
+        where: {
+          entityType: 'room',
+          entityId: existingRoom.id,
+          field: 'ceilingIn',
+          source: 'manual',
+          isOverride: true,
+          unpinnedAt: null,
+        },
+      });
+
+      measurements.push({
+        entityType: 'room',
+        entityId: existingRoom.id,
+        field: 'ceilingIn',
+        valueIn: Number(roomData.ceilingIn),
+      });
+
+      if (!ceilingPin) {
+        changes.push({
+          op: 'update',
+          entityType: 'room',
+          entityId: existingRoom.id,
+          field: 'ceilingIn',
+          after: Number(roomData.ceilingIn),
+        });
+      }
+
       changes.push({
         op: 'update',
         entityType: 'room',
         entityId: existingRoom.id,
         field: 'label',
         after: roomData.label,
-      });
-      changes.push({
-        op: 'update',
-        entityType: 'room',
-        entityId: existingRoom.id,
-        field: 'ceilingIn',
-        after: Number(roomData.ceilingIn),
       });
 
       for (const wall of existingRoom.walls) {
@@ -457,15 +491,25 @@ export async function promoteScanImport(
         entityType: 'wall',
         tempRef: wallRef,
         fields: {
-          roomId: existingRoom.id,
+          roomId: existingRoom ? existingRoom.id : `$room-1`,
           startXIn: Number(wallData.startXIn),
           startYIn: Number(wallData.startYIn),
           endXIn: Number(wallData.endXIn),
           endYIn: Number(wallData.endYIn),
           heightIn: Number(wallData.heightIn),
           thicknessIn: Number(wallData.thicknessIn || 5),
+          measurementStatus: 'scan',
         },
       });
+
+      measurements.push(
+        { entityType: 'wall', entityRef: wallRef, field: 'startXIn', valueIn: Number(wallData.startXIn) },
+        { entityType: 'wall', entityRef: wallRef, field: 'startYIn', valueIn: Number(wallData.startYIn) },
+        { entityType: 'wall', entityRef: wallRef, field: 'endXIn', valueIn: Number(wallData.endXIn) },
+        { entityType: 'wall', entityRef: wallRef, field: 'endYIn', valueIn: Number(wallData.endYIn) },
+        { entityType: 'wall', entityRef: wallRef, field: 'heightIn', valueIn: Number(wallData.heightIn) },
+        { entityType: 'wall', entityRef: wallRef, field: 'thicknessIn', valueIn: Number(wallData.thicknessIn || 5) }
+      );
     }
 
     const wallRefs = new Map<string, string>();
@@ -476,10 +520,11 @@ export async function promoteScanImport(
     for (const [idxStr, openingData] of Object.entries(dataByEntity.opening || {})) {
       const wallRef = wallRefs.get(openingData.wallIdentifier);
       if (wallRef) {
+        const openingRef = `opening-${idxStr}`;
         changes.push({
           op: 'create',
           entityType: 'opening',
-          tempRef: `opening-${idxStr}`,
+          tempRef: openingRef,
           fields: {
             wallId: `$${wallRef}`,
             type: openingData.type,
@@ -487,41 +532,86 @@ export async function promoteScanImport(
             widthIn: Number(openingData.widthIn),
             sillIn: Number(openingData.sillIn),
             headIn: Number(openingData.headIn),
+            measurementStatus: 'scan',
+          },
+        });
+
+        measurements.push(
+          { entityType: 'opening', entityRef: openingRef, field: 'offsetIn', valueIn: Number(openingData.offsetIn) },
+          { entityType: 'opening', entityRef: openingRef, field: 'widthIn', valueIn: Number(openingData.widthIn) },
+          { entityType: 'opening', entityRef: openingRef, field: 'sillIn', valueIn: Number(openingData.sillIn) },
+          { entityType: 'opening', entityRef: openingRef, field: 'headIn', valueIn: Number(openingData.headIn) }
+        );
+      }
+    }
+
+    let revisionNumber = scanImport.house.currentRevision || 0;
+    let roomId = existingRoom?.id;
+    
+    const result = await saveChangesForRescan(
+      tx,
+      null,
+      revisionNumber,
+      changes,
+      `Promoted scan: ${roomData.label}`,
+      { houseId: scanImport.houseId }
+    );
+    revisionNumber = typeof result.revision === 'number' ? result.revision : result.revision.number;
+    
+    if (!existingRoom) {
+      roomId = result.refs['room-1'];
+    }
+
+    for (const meas of measurements) {
+      let entityId = meas.entityId;
+      if (!entityId && meas.entityRef) {
+        entityId = result.refs[meas.entityRef];
+      }
+
+      if (entityId) {
+        const existingPin = await tx.measurement.findFirst({
+          where: {
+            entityType: meas.entityType,
+            entityId,
+            field: meas.field,
+            source: 'manual',
+            isOverride: true,
+            unpinnedAt: null,
+          },
+        });
+
+        await tx.measurement.create({
+          data: {
+            entityType: meas.entityType,
+            entityId,
+            field: meas.field,
+            valueIn: meas.valueIn,
+            source: 'scan',
+            isOverride: false,
+            uploadId: scanImport.uploadId,
+            recordedBy: 'system',
+            note: existingPin ? `Scanned value (not applied - pinned to ${existingPin.valueIn})` : null,
           },
         });
       }
     }
 
-    let revisionNumber = scanImport.house.currentRevision || 0;
-    
-    if (changes.length > 0) {
-      const result = await saveChanges(
-        prisma,
-        null,
-        revisionNumber,
-        changes,
-        `Promoted scan: ${roomData.label}`,
-        { houseId: scanImport.houseId, isCurrent: true }
-      );
-      revisionNumber = typeof result.revision === 'number' ? result.revision : result.revision.number;
-    }
-
-    await prisma.scanImport.update({
+    await tx.scanImport.update({
       where: { id: scanImportId },
       data: {
         status: 'promoted',
         promotedAt: new Date(),
         promotedBy: actor,
-        roomId: existingRoom.id,
+        roomId,
       },
     });
 
-    await prisma.house.update({
+    await tx.house.update({
       where: { id: scanImport.houseId },
       data: { currentRevision: revisionNumber },
     });
 
-    return { success: true, roomId: existingRoom.id, revisionId: revisionNumber };
+    return { success: true, roomId, revisionId: revisionNumber };
   };
 
   if (tx) {

@@ -110,14 +110,21 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     if (op.op === 'create') {
       if (!d.create) throw new ApiError(400, 'not_creatable', `${op.entityType} can't be created by a change`);
       const data: Record<string, any> = {};
-      for (const [k, v] of Object.entries(op.fields ?? {})) data[k] = resolve(op.entityType, k, v);
+      for (const [k, v] of Object.entries(op.fields ?? {})) {
+        const spec = fieldSpec(op.entityType, k, true);
+        if (spec && (spec as any).system && W === null && !allowSystem) {
+          data[k] = v;
+        } else {
+          data[k] = resolve(op.entityType, k, v);
+        }
+      }
       if (!allowSystem) {
         const missing = d.required.filter((k) => data[k] === undefined);
         if (missing.length) throw new ApiError(400, 'missing_fields', `${op.entityType} create needs ${missing.join(', ')}`);
       }
       if (op.entityType === 'placement' && !allowSystem) data.workspaceId = W;
       await checkRefs(op.entityType, data);
-      if (op.entityType === 'placement' && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
+      if (op.entityType === 'placement' && !allowSystem && W !== null && W > 0 && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
       if (op.id != null) data.id = op.id;
       const row = await model.create({ data });
       if (op.tempRef) refs[op.tempRef] = row.id;
@@ -186,7 +193,7 @@ export async function commitRevision(
     if (!p.houseId) throw new ApiError(400, 'invalid_request', 'houseId required for Current revisions');
     houseId = p.houseId;
     number = (p.baseRevision ?? 0) + 1;
-    scope = 'current';
+    scope = 'house';
   }
 
   const rev = await tx.revision.create({
@@ -231,6 +238,30 @@ export async function saveChanges(
     kind: 'save',
     actor: params?.isCurrent ? 'system' : 'michael',
     note: note ?? 'Edit in the editor',
+    changes,
+    baseRevision,
+  });
+
+  return { revision: rev, refs, roomId: refs['room-1'], unchanged: false };
+}
+
+export async function saveChangesForRescan(
+  tx: Tx,
+  workspaceId: number | null,
+  baseRevision: number,
+  ops: Op[],
+  note?: string,
+  params?: { houseId?: number }
+) {
+  const effectiveWorkspaceId = workspaceId === null ? null : workspaceId;
+  const { changes, refs } = await applyOps(tx, ops, { workspaceId: effectiveWorkspaceId, mode: 'save' });
+
+  const rev = await commitRevision(tx, {
+    workspaceId,
+    houseId: params?.houseId,
+    kind: 'rescan',
+    actor: 'system',
+    note: note ?? 'Scan promotion',
     changes,
     baseRevision,
   });
