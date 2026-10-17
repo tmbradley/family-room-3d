@@ -46,6 +46,11 @@ live, the editor is served only from Railway and Pages gets turned off (section 
 - **Current:** the house as it is today. That means walls, openings, ceiling heights, floor and
   wall colors, fixtures, and **the furniture that's there now** (Decided). It's **locked** in normal
   use and only changes on purpose, like after a rescan or a measurement fix.
+- **No Current yet (Decided, Oct 17, 2026).** The house starts with **no Current**. The family room
+  that was seeded first is a **test room**, not Current: it lives in an ordinary editable workspace,
+  "Test room (family room draft)", with its existing furniture and rough measurements. Current is
+  created later, only from a real scan or confirmed measurements. Until then the API returns
+  `current: null` and the editor shows "No Current yet. Create one from a scan."
 - **Measurements start rough and get refined (Decided).** We start with rough measurements entered
   by hand. Tape measurements and, later, scans refine them. Every dimension and position keeps
   track of where its value came from (`manual_estimate`, `measured`, or `scan`). A **manual
@@ -72,7 +77,8 @@ live, the editor is served only from Railway and Pages gets turned off (section 
 
 ## 3. UI: tabs, split view, sync
 
-- **Tabs:** one tab per workspace, with **Current** always first and shown as locked. Tabs can be
+- **Tabs:** one tab per workspace, with **Current** first and shown as locked once it exists. Before
+  that, the first slot is an empty state ("No Current yet, create one from a scan"). Tabs can be
   added (copied from Current or from another workspace), renamed, duplicated, and deleted.
 - **Split view:** show any two tabs side by side. On a phone, stack them top and bottom.
 - **Sync toggle:** when on, both panes share one camera. Orbit angle, zoom, pan, and top/3D mode
@@ -245,13 +251,13 @@ Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 
 | Table | Columns (FK → table) | Notes |
 |---|---|---|
-| `houses` | id, name, current_revision | One row for now. |
-| `rooms` | id, house_id → houses, slug, label, origin_x_in, origin_y_in, rotation_deg, ceiling_in, floor_material, floor_color, wall_color, trim_color | Structure for Current. |
+| `houses` | id, name, current_revision | One row for now. `current_revision` NULL = no Current yet. |
+| `rooms` | id, house_id → houses, slug, label, origin_x_in, origin_y_in, rotation_deg, ceiling_in, floor_material, floor_color, wall_color, trim_color, draft_workspace_id → workspaces (nullable) | Structure for Current when `draft_workspace_id` is NULL. Otherwise a draft room owned by that one workspace (like the test room), not part of Current. |
 | `walls` | id, room_id → rooms, start_x_in, start_y_in, end_x_in, end_y_in, height_in, thickness_in, is_open, label | |
 | `openings` | id, wall_id → walls, type, offset_in, width_in, sill_in, head_in, treatment, notes | Treatment examples: "white horizontal blinds". |
 | `fixtures` | id, room_id → rooms, type (ceiling_fan/outlet/switch/light), name, color, x_in, y_in, wall_id → walls (nullable), count | Fan, outlets, switch plates. |
 | `room_links` | id, wall_a_id → walls, wall_b_id → walls, offset_in | Records that two rooms meet along these walls (stitching). |
-| `workspaces` | id, house_id → houses, name, notes, base_revision, revision, created_by (michael/bot), source_proposal_id → proposals (nullable) | Base is always Current. `base_revision` = the Current revision it was last reconciled with. |
+| `workspaces` | id, house_id → houses, name, notes, base_revision, revision, created_by (michael/bot), source_proposal_id → proposals (nullable) | Normally based on Current. `base_revision` = the Current revision it was last reconciled with; NULL = not based on Current (draft/test workspaces made before Current exists). |
 | `workspace_rooms` | workspace_id → workspaces, room_id → rooms | Which rooms a workspace covers (many-to-many). |
 | `workspace_room_styles` | workspace_id, room_id, wall_color, trim_color, floor_color | Per-design color overrides. Missing = same as Current. |
 | `measurements` | id, entity_type, entity_id, field, value_in, source (manual_estimate/measured/scan), is_override, upload_id → uploads (nullable), recorded_by, recorded_at, note | Provenance for every dimension and position. Never deleted. |
@@ -520,20 +526,22 @@ and turning off Pages once confirmed.
 - Passkey login with a one-time setup code and recovery codes. Session cookie. The `agent_keys` table
   and a way to create a key.
 - Seed script: import `tmbradley/house-data/house.json` into the relational tables, converting feet to
-  integer inches (the family room as Current, with existing furniture). Recorded as revision 1 (`kind = 'seed'`),
+  integer inches. **Correction (Oct 17):** the family room is a test room, not Current. It's seeded as the
+  workspace "Test room (family room draft)" (migration `0002_no_current_test_room`), and the house has no
+  Current yet. Recorded as revision 1 (`kind = 'seed'`) of that workspace,
   with `measurements` rows: confirmed room dimensions as `measured`, photo-based furniture sizes as `manual_estimate`.
 - Health check and a nightly JSON export (to the bucket, and optionally committed to `house-data`).
 - After the Railway version is live and checked: **turn off GitHub Pages** on `tmbradley/family-room-3d`
   and point the README at the Railway URL.
 
 **Done when:** the editor loads from the Railway URL in desktop and phone browsers, you can sign in
-with Face ID on the iPhone and Touch ID on the Mac, `GET /api/house` returns the seeded family room
-with measurement sources, an unauthenticated request gets `401`, and GitHub Pages is off.
+with Face ID on the iPhone and Touch ID on the Mac, `GET /api/house` returns `current: null` and the
+test-room workspace with measurement sources, an unauthenticated request gets `401`, and GitHub Pages is off.
 
 ### P1: House data in the editor, Current + workspace tabs, proposals, MCP server
-- The editor loads the house from the API instead of `catalog.js` defaults, and the family room
-  looks identical to today, including the existing furniture.
-- Tab bar: Current (locked) first, then workspaces. Add, duplicate, rename, and delete tabs.
+- The editor loads the house from the API instead of `catalog.js` defaults, and the test room
+  (family room draft) looks identical to today, including the existing furniture.
+- Tab bar: Current (locked) first once it exists, or the "No Current yet" empty state, then workspaces. Add, duplicate, rename, and delete tabs.
 - Saves go to the API with optimistic updates and revision-number conflict checks.
   `localStorage` keeps drafts. Every save is an append-only revision.
 - Each workspace marks every Current piece keep / replace / remove.

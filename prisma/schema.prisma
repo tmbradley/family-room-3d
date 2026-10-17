@@ -42,7 +42,7 @@ enum ItemStatus {
 }
 
 enum PlacementAction {
-  existing // a piece in Current
+  existing // an as-is piece (in Current, or in a draft room's as-is layout)
   keep
   replace
   remove
@@ -126,12 +126,14 @@ enum ChallengeKind {
   login
 }
 
-// ---------- House structure (Current) ----------
+// ---------- House structure ----------
+// Rooms with draftWorkspaceId = NULL make up Current. A house has no Current until
+// currentRevision is set (from a real scan or confirmed measurements).
 
 model House {
   id              Int      @id @default(autoincrement())
   name            String   @db.VarChar(120)
-  currentRevision Int      @default(0) @map("current_revision")
+  currentRevision Int?     @map("current_revision") // NULL = no Current yet
   createdAt       DateTime @default(now()) @map("created_at")
 
   rooms      Room[]
@@ -161,8 +163,10 @@ model Room {
   trimColorName     String?           @map("trim_color_name") @db.VarChar(60)
   trimColor         String?           @map("trim_color") @db.VarChar(9)
   measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+  draftWorkspaceId  Int?              @map("draft_workspace_id") // set = draft room owned by that workspace, not part of Current
 
   house          House                @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  draftWorkspace Workspace?           @relation("draftRooms", fields: [draftWorkspaceId], references: [id], onDelete: Cascade)
   walls          Wall[]
   fixtures       Fixture[]
   placements     Placement[]
@@ -174,6 +178,7 @@ model Room {
   uploadTokens   UploadToken[]
 
   @@unique([houseId, slug])
+  @@index([draftWorkspaceId])
   @@map("rooms")
 }
 
@@ -280,7 +285,7 @@ model Workspace {
   houseId          Int      @map("house_id")
   name             String   @db.VarChar(120)
   notes            String?  @db.Text
-  baseRevision     Int      @default(0) @map("base_revision")
+  baseRevision     Int?     @map("base_revision") // Current revision it was reconciled with; NULL = not based on Current
   revision         Int      @default(0)
   createdBy        Actor    @map("created_by")
   sourceProposalId Int?     @unique @map("source_proposal_id")
@@ -295,6 +300,7 @@ model Workspace {
   targetedBy         Proposal[]           @relation("target")
   revisions          Revision[]
   costEstimates      CostEstimate[]
+  draftRooms         Room[]               @relation("draftRooms")
 
   @@map("workspaces")
 }

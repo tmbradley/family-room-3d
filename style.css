@@ -40,3 +40,5 @@ label.check input { width: auto; }
   #sidebar.collapsed { display: none; }
   #toggleSidebar { display: block; }
 }
+
+.empty-state { margin-top: 8px; padding: 8px 10px; border: 1px dashed #b98a4e; border-radius: 6px; background: rgba(185, 138, 78, 0.12); font-size: 12px; line-height: 1.4; }

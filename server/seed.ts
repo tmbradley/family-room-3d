@@ -1,7 +1,9 @@
 /**
  * Seed the database from tmbradley/house-data house.json (feet -> integer inches).
  * Room structure comes in as `measured`; window sill/head, fixture positions and
- * furniture sizes/positions come in as `manual_estimate`. Recorded as revision 1 (kind=seed).
+ * furniture sizes/positions come in as `manual_estimate`.
+ * `current` (optional, usually null) seeds Current as revision 1 (kind=seed). Each entry in
+ * `workspaces` with `rooms` seeds an editable workspace whose rooms are draft rooms (not Current).
  */
 import { Prisma, PrismaClient } from '@prisma/client';
 
@@ -42,9 +44,10 @@ export async function seedHouse(prisma: PrismaClient, src: any, force = false) {
     const house = await tx.house.create({ data: houseData });
     record('house', house.id, houseData);
 
-    for (const r of src.current.rooms) {
+    const seedRooms = async (rooms: any[], workspaceId: number | null) => {
+    for (const r of rooms) {
       const roomData = {
-        houseId: house.id, slug: r.id, label: r.label,
+        houseId: house.id, slug: r.id, draftWorkspaceId: workspaceId ?? undefined, label: r.label,
         originXIn: ft(r.origin?.x ?? 0), originYIn: ft(r.origin?.z ?? 0), rotationDeg: r.rotation ?? 0,
         ceilingIn: ft(r.ceiling),
         floorMaterial: r.floor?.material, floorFinish: r.floor?.finish, floorColor: r.floor?.color, floorKeep: !!r.floor?.keep,
@@ -111,7 +114,7 @@ export async function seedHouse(prisma: PrismaClient, src: any, force = false) {
         record('furniture_item', item.id, itemData);
         measure('furniture_item', item.id, { wIn: p.w, dIn: p.d, hIn: p.h }, 'manual_estimate', 'estimated from photos');
         const placementData = {
-          roomId: room.id, itemId: item.id, xIn: ft(p.x), yIn: ft(p.z), rotationDeg: p.rot ?? 0,
+          workspaceId: workspaceId ?? undefined, roomId: room.id, itemId: item.id, xIn: ft(p.x), yIn: ft(p.z), rotationDeg: p.rot ?? 0,
           action: 'existing' as const, measurementStatus: 'manual_estimate' as const,
         };
         const pl = await tx.placement.create({ data: placementData });
@@ -120,12 +123,32 @@ export async function seedHouse(prisma: PrismaClient, src: any, force = false) {
       }
     }
 
+    };
+
+    const scopes: { scope: string; workspaceId: number | null }[] = [];
+    if (src.current?.rooms?.length) {
+      await seedRooms(src.current.rooms, null);
+      scopes.push({ scope: 'current', workspaceId: null });
+    }
+    for (const w of src.workspaces ?? []) {
+      const ws = await tx.workspace.create({
+        data: { houseId: house.id, name: w.name, notes: w.notes, baseRevision: null, revision: 1, createdBy: 'system' },
+      });
+      record('workspace', ws.id, { name: w.name, notes: w.notes });
+      await seedRooms(w.rooms ?? [], ws.id);
+      const rooms = await tx.room.findMany({ where: { draftWorkspaceId: ws.id }, select: { id: true } });
+      if (rooms.length) await tx.workspaceRoom.createMany({ data: rooms.map((r) => ({ workspaceId: ws.id, roomId: r.id })) });
+      scopes.push({ scope: `workspace:${ws.id}`, workspaceId: ws.id });
+    }
+    // One seed revision holds every change row; it is filed under Current if Current was seeded,
+    // otherwise under the first workspace.
+    const main = scopes[0] ?? { scope: 'current', workspaceId: null };
     const rev = await tx.revision.create({
-      data: { houseId: house.id, scope: 'current', number: 1, actor: 'system', kind: 'seed', note: 'Seed from tmbradley/house-data house.json' },
+      data: { houseId: house.id, scope: main.scope, workspaceId: main.workspaceId, number: 1, actor: 'system', kind: 'seed', note: 'Seed from tmbradley/house-data house.json' },
     });
     await tx.revisionChange.createMany({ data: changes.map((c) => ({ ...c, revisionId: rev.id })) });
     await tx.measurement.createMany({ data: measurements });
-    await tx.house.update({ where: { id: house.id }, data: { currentRevision: 1 } });
+    if (src.current?.rooms?.length) await tx.house.update({ where: { id: house.id }, data: { currentRevision: 1 } });
     return `Seeded house ${house.id}: ${changes.length} revision change rows, ${measurements.length} measurements.`;
   }, { timeout: 60_000 });
 }

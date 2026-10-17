@@ -579,3 +579,16 @@ renderer.setAnimationLoop(() => {
 window.familyRoom = { items: () => items, select: selectItem, setView, rotateSelected, removeItem, footprint, serialize };
 window.familyRoom._project = (x, z) => { const v = W(x, z, 0.5).project(camera); const r = renderer.domElement.getBoundingClientRect(); return { x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; };
 window.familyRoom._scene = scene;
+
+// House status from the API (only when signed in). Shows the "no Current yet" empty state.
+fetch('/api/house', { credentials: 'same-origin' })
+  .then((r) => (r.ok ? r.json() : null))
+  .then((h) => {
+    const el = document.getElementById('houseStatus');
+    if (!h || !el) return;
+    if (h.hasCurrent) { el.hidden = true; return; }
+    const names = (h.workspaces || []).map((w) => w.name).join(', ');
+    el.innerHTML = '<strong>No Current yet.</strong> Create one from a scan or confirmed measurements.' +
+      (names ? ' Workspaces: ' + names.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]) + '.' : '');
+  })
+  .catch(() => {});
