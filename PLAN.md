@@ -1,10 +1,12 @@
 # House Design Planner: Project Plan
 
-Status: draft for discussion · Last updated: Oct 17, 2026
+Status: draft, with Michael's answers folded in · Last updated: Oct 17, 2026
 
 This plan describes how the current single-room editor grows into a planner for the whole house.
-Each phase lists what gets built and how we'll know it's done. Nothing here is final. Open
-questions are listed at the end.
+Each phase lists what gets built and how we'll know it's done. Decisions made so far are marked
+**Decided**. Remaining open questions are listed at the end.
+
+**Rooms:** there's no fixed order after the family room. **Decided:** we pick the next room as we go.
 
 ---
 
@@ -37,7 +39,7 @@ A static three.js editor (no build step, three.js loaded from a CDN with an impo
 ## 2. Core model: "Current" plus design workspaces
 
 - **Current:** the house as it is today. That means walls, openings, ceiling heights, floor and
-  wall colors, and existing furniture. It comes from scans or manual entry. It's **locked** in normal
+  wall colors, fixtures, and **the furniture that's there now** (Decided). It comes from scans or manual entry. It's **locked** in normal
   use and only changes on purpose, like after a rescan or a measurement fix.
 - **Workspaces:** design ideas copied from Current, like "Classic MCM" or "Moody den." A workspace
   can cover one room or several. Inside it you can move furniture, change colors, and swap pieces
@@ -45,6 +47,10 @@ A static three.js editor (no build step, three.js loaded from a CDN with an impo
 - **Structure vs. design:** each workspace stores only its **design layer** (furniture placements,
   colors, notes, shopping list) and points at Current for **structure** (walls, openings). When
   Current changes, every workspace picks up the new structure automatically.
+- **Existing furniture in designs (Decided):** every design marks each Current piece as **keep**,
+  **replace** (with a link to the new piece), or **remove**. Kept pieces stay in place unless moved
+  and cost $0. Replaced and removed pieces drop out of that design's view, and the new pieces go on
+  its shopping list.
 - **When structure changes break a design:** if a rescan moves a wall and furniture ends up
   outside the room or overlapping a wall or opening, the editor flags those pieces in that
   workspace. It doesn't move them silently.
@@ -102,6 +108,39 @@ Edits snap to 1" by default (toggle off for free placement). Every edit can be u
   with link, price, quantity, and a total. Pieces marked "keep" from Current show as $0.
   Exportable as CSV.
 
+### Cost to change the room (Decided)
+
+No budget is set yet. Instead, every design gets a **cost-to-change estimate**: a step-by-step
+breakdown of what it takes to turn Current into that design. Each step says what changes and gives a
+low/high cost range, followed by a total.
+
+| Step | Example of what changes | Estimate |
+|---|---|---|
+| Paint | Walls greige → olive. Trim stays white. | $150 – $400 |
+| Outlets & switch plates | Swap the almond ones for white or matte black | $40 – $120 |
+| Lighting | Replace the black fan with a walnut-blade fan or flush mount. Add a floor lamp. | $250 – $700 |
+| Window treatments | White blinds → linen roman shade | $120 – $350 |
+| Furniture | New sofa and credenza. Keep the swivel chair ($0). | $1,800 – $3,500 |
+| Rug | Gray geometric → wool flatweave 8×10 | $250 – $700 |
+| Decor | Art, pillows, plants | $150 – $400 |
+| **Total** | | **$2,760 – $6,170** |
+
+(The numbers above only show the format. They aren't real estimates yet.)
+
+- Steps come from a fixed list: paint, outlets/switch plates, lighting, window treatments,
+  furniture, rug, decor, other. Steps with no changes are left out.
+- Line items link to the catalog or shopping list where a real product is chosen. Those use the
+  actual price as both low and high. Items that are still ideas use a range.
+- Pieces marked **keep** cost $0. Removed pieces cost $0 (resale value isn't counted).
+- The estimate recalculates whenever the design or a price changes. Each proposal shows its change
+  to the total (section 7).
+
+### Stores (task)
+
+The bot will research a few budget-friendly sources of mid-century lookalikes besides West Elm,
+checking price range, quality reviews, shipping, and returns. It will add only verified sources to
+the Notion database as a "store" option. The list isn't filled in here until that research is done.
+
 ---
 
 ## 6. Data storage
@@ -147,41 +186,103 @@ One file per house. Units are feet for positions and inches for furniture sizes,
       "notes": "",
       "colors": { "family": { "wallColor": "#8a8f7a" } },
       "structureOverrides": [],
+      "currentFurniture": {                    // decision for each Current piece
+        "sectional": { "action": "replace", "with": "sofa-mcm-84" },
+        "swivel":    { "action": "keep" },
+        "rug":       { "action": "remove" }
+      },
       "placements": [
-        { "room": "family", "catalogId": "sofa", "x": 10.0, "z": 6.5, "rot": 270 }
-      ]
+        { "room": "family", "catalogId": "sofa-mcm-84", "x": 10.0, "z": 6.5, "rot": 270 }
+      ],
+      "costEstimate": {
+        "steps": [
+          { "step": "paint", "changes": "Walls greige -> olive", "low": 150, "high": 400 },
+          { "step": "furniture", "changes": "New 84in sofa; keep swivel chair", "low": 1200, "high": 2200,
+            "items": [ { "catalogId": "sofa-mcm-84", "low": 1200, "high": 2200 },
+                       { "currentId": "swivel", "action": "keep", "low": 0, "high": 0 } ] }
+        ],
+        "total": { "low": 1350, "high": 2600 },
+        "updatedAt": "2026-10-17T21:00:00Z"
+      },
+      "history": []                           // ids of applied proposals / saves, newest last
     }
   ]
 }
 ```
 
-### Where it lives: options
+### Where it lives (Decided)
 
-GitHub Pages only serves static files, so saving from the browser needs somewhere to write to.
+**A private repo, [`tmbradley/house-data`](https://github.com/tmbradley/house-data).** The public app
+repo holds only code.
 
-| Option | Pros | Cons |
-|---|---|---|
-| A. `localStorage` only | Simple. Already works. | Stuck on one device. Easy to lose. The bot can't see it. |
-| B. JSON in this public repo, saved through the GitHub API | Version history for free. The bot edits it with `gh`. Works from phone and laptop. | Public repo means the house layout is public. Each device needs a token. |
-| C. JSON in a **separate private repo** (e.g. `tmbradley/house-data`), saved through the GitHub API | Same as B, but private. Version history. The bot can read and write it. | Each device needs a fine-grained token (scoped to that one repo) stored in the browser. |
-| D. Notion as the store | Already the furniture database. Easy to browse. | Browser can't call Notion without a server or proxy. Poor fit for nested geometry. No real history. |
+```
+house-data/
+  house.json        Current + all workspaces
+  proposals/        one JSON file per change request (section 7)
+  history/          one JSON file per applied change, used for rollback
+  catalog.json      furniture synced from Notion (P4)
+```
 
-### Recommendation: C, with `localStorage` for drafts
-
-- The house file (`house.json`), synced `catalog.json`, and inspiration data live in a private
-  `house-data` repo. The public app stays code only.
-- Edits autosave to `localStorage` right away. **Save** commits the file through the GitHub
-  contents API (one commit per save, with a short message). **Load** pulls the latest version.
-- If the file changed on GitHub since your last load (from the other device or from the bot), the
+- The app reads and writes these files through the **GitHub contents API**. Each device needs a
+  **fine-grained GitHub token**, pasted once, with access to `house-data` only (contents
+  read/write). The token stays in that browser.
+- Edits autosave to `localStorage` as drafts. **Save** commits to `house-data`. **Load** pulls the
+  latest version.
+- If the file changed on GitHub since the last load (from the other device or from the bot), the
   app asks before overwriting instead of losing either version.
-- Setup per device: paste a fine-grained GitHub token once (access to `house-data` only,
-  contents read/write). It stays in that browser.
-- Notion stays the place for furniture and inspiration notes that a person browses. It isn't the
-  source of truth for geometry.
+- The bot reads and writes the same repo with `gh`. Git history doubles as a backup.
+- Notion stays the place for furniture and inspiration a person browses. It isn't the source of
+  truth for geometry.
+- **Seeded:** `house.json` already has the family room as Current: walls, fireplace, window, open
+  edge, greige walls, white trim, honey oak floors, black ceiling fan, white blinds, and the
+  existing furniture (charcoal L-sectional, matching round swivel chair, gray geometric rug, dual
+  stacked TVs). Sizes and positions estimated from photos are flagged `"approx": true`.
+
+Other options we considered: `localStorage` only (one device, and the bot can't see it), JSON in
+the public repo (exposes the house layout), and Notion as the store (the browser can't call Notion
+without a server, and it's a poor fit for geometry).
 
 ---
 
-## 7. Scanning (later phase, not now)
+## 7. Change management: proposals (Decided)
+
+**Rule:** inspiration from the X bookmark routine, and any other bot suggestion, **never edits a
+design directly**. It creates a **proposal** (a change request). Only Michael applies changes,
+by approving them.
+
+**What a proposal contains** (one file in `house-data/proposals/`):
+
+- **Source:** link to the X post or other origin, plus an image if there is one
+- **Target:** room(s) and workspace, or "new workspace" with a suggested name
+- **Changes:** a list of specific edits with **before / after** values (move this piece, replace
+  that one, change wall color, add an item). It's precise enough to apply automatically.
+- **Rationale:** why it fits the room and the design style
+- **Cost impact:** the change to that design's cost-to-change total (low/high)
+- **Status:** `proposed` → `approved` or `rejected` → `applied`, with dates and an optional
+  comment from Michael
+
+**In the editor: a Proposals panel**
+
+- Lists open proposals with a count badge, newest first. You can filter by room or workspace.
+- Opening one shows a **visual before/after in split view**: the workspace as it is on the left
+  and the workspace with the proposal applied on the right, with camera sync on. The change list,
+  rationale, and cost impact are shown underneath.
+- **Approve** applies the changes to the workspace. For "new workspace," it creates the workspace
+  from Current plus the changes. **Reject** keeps the file with status `rejected` and an optional
+  reason, so the bot learns what you don't want.
+- If the workspace changed since the proposal was written and a "before" value no longer
+  matches, the editor flags it and won't apply it blindly. You can still apply the parts that match,
+  or reject it.
+
+**History and rollback**
+
+- Every applied proposal (and every manual save of a workspace) writes an entry to
+  `house-data/history/` with what changed and the before values.
+- Each workspace has a History list. **Roll back** reverses one entry (if later changes don't
+  conflict) or restores the workspace to how it was at that point.
+- Current has its own history for rescans and measurement fixes.
+
+## 8. Scanning (later phase, not now)
 
 Scanning is deferred. Planning and the editor come first.
 
@@ -213,15 +314,16 @@ fireplace finish.
 
 ---
 
-## 8. Inspiration pipeline (X bookmarks)
+## 9. Inspiration pipeline (X bookmarks)
 
 **What already runs:** a daily routine (about 7 PM ET) reads new X bookmarks and handles each one in order:
 
 1. Skip anything that isn't about home design.
 2. Decide which room or rooms it applies to (it can be more than one).
-3. Compare it with that room's existing design workspaces. If it fits one, tweak that workspace.
-   If not, create a new workspace for it. **Current is never changed.**
-4. Post a short note listing each bookmark and what happened to it. Nothing on days with no
+3. Compare it with that room's existing design workspaces. If it fits one, write a **proposal**
+   targeting that workspace. If not, write a proposal for a **new workspace**. Nothing is applied
+   until Michael approves it (section 7). **Current is never changed.**
+4. Post a short note listing each bookmark and the proposal it produced. Nothing on days with no
    design bookmarks.
 
 **Until the editor supports workspaces**, designs are tracked by the bot in
@@ -231,39 +333,54 @@ change, colors, furniture ideas, and the source bookmark URL.
 
 **How the editor will consume it:**
 
-- After phase 1, the bot writes designs straight into `house.json` as workspaces, each with
-  `source: { kind: "x-bookmark", url }`, and commits to the data repo. They show up as tabs on the next load.
-- Existing entries in `designs.json` get migrated once into workspaces. Any that need furniture
-  get placeholder pieces from the catalog, labeled as placeholders.
+- As of P1, the bot writes **proposals** to `house-data/proposals/` instead of `designs.json` and
+  commits them. They show up in the Proposals panel (P2), and Michael approves or rejects them there.
+- Existing entries in `designs.json` are converted once into proposals (mostly "new workspace"), not
+  applied directly. Any that need furniture get placeholder catalog pieces, labeled as placeholders.
 - Inspiration notes and images can also go to a Notion board for browsing, once the personal
   Notion connection is fixed.
-- Bot-created or bot-changed workspaces show a small "updated by bot" marker with the date until you open them.
+- Workspaces created or changed by an approved proposal link back to it in their History.
 
 ---
 
-## 9. Phased roadmap
+## 10. Phased roadmap
 
-The suggested order is mostly kept. Two changes: **data sync moves into P1**, because the
-bot-driven workspaces and phone/laptop use both depend on it, and **the inspiration hookup moves
-into P1** as well, since the daily routine is already producing designs.
+The suggested order is mostly kept, with these changes:
+
+- **Data sync moves into P1**, because phone/laptop use and the bot both depend on it.
+- **Proposals start in P1 and P2**, because the daily routine is already running. In P1 the bot
+  writes proposals to `house-data` and the editor lists them with Approve/Reject. In P2 the panel
+  gets the visual before/after in split view, plus history and rollback.
+- **Cost-to-change estimates ship with shopping lists in P4.**
 
 ### P1: House data model, Current + workspace tabs, family room migration
 - Define `house.json` (section 6). Move the family room into it: walls, fireplace, window, open edge, and the existing furniture as Current.
 - Tab bar: Current (locked) first, then workspaces. Add, duplicate, rename, and delete tabs.
-- Save and load against the private data repo, with `localStorage` drafts and a conflict prompt.
-- Import the bot's `designs.json` entries as workspaces.
+- Save and load against `tmbradley/house-data` with a per-device token, `localStorage` drafts, and
+  a conflict prompt.
+- Current includes existing furniture. Each workspace marks every Current piece keep / replace / remove.
+- Proposals, basic version: the bot writes proposals to `house-data/proposals/`. The editor lists
+  them with source link, target, change list, and rationale, with Approve/Reject buttons that apply
+  the change or mark it rejected. The bot's `designs.json` entries are converted into proposals.
 
 **Done when:** the live site loads the family room from `house.json` and it looks identical to
-today. You can create two workspaces, move furniture in one without affecting Current or the
-other, save on the laptop, and see it on the phone after reload. Bot-created workspaces appear as tabs.
+today, including the existing furniture. You can create two workspaces, move furniture in one
+without affecting Current or the other, save on the laptop, and see it on the phone after reload.
+A bookmark from the daily routine shows up as a proposal. Approving it changes (or creates) the
+target workspace. Rejecting it changes nothing.
 
-### P2: Split view + camera sync
+### P2: Split view + camera sync + Proposals panel
 - Show any two tabs side by side (stacked on a phone).
 - Sync toggle: shared orbit angle, zoom, pan, and top/3D mode.
 - Optional: follow selected room.
+- Proposals panel opens each proposal as a before/after split view with sync on. Rejected proposals
+  keep the reason, and a proposal whose "before" values no longer match gets flagged.
+- History for every workspace (and for Current), with rollback.
 
 **Done when:** with sync on, rotating, zooming, panning, or switching top/3D in either pane makes the
 other match exactly. With sync off, the panes move independently. It works on iPhone Safari and desktop.
+Opening a proposal shows the workspace before and after side by side. Approving it adds a History entry,
+and rolling back that entry restores the workspace exactly.
 
 ### P3: Structure editing tools
 - Wall edit, openings, measure, labels, colors from photo (section 4). Undo and redo.
@@ -273,12 +390,18 @@ other match exactly. With sync off, the panes move independently. It works on iP
 **Done when:** you can draw a new rectangular room with a door and a window to within 1" of tape
 measurements, and a measurement fix on Current shows up in every workspace.
 
-### P4: Notion furniture catalog + shopping lists
+### P4: Notion furniture catalog + shopping lists + cost to change
 - Fix the personal Notion connection. Create the furniture database. The bot syncs it to `catalog.json`.
 - Per-workspace shopping list with links, prices, and totals. CSV export.
+- Cost-to-change estimate for every design: steps (paint, outlets/switch plates, lighting, window
+  treatments, furniture, rug, decor), what changes in each step, a low/high range, and a total.
+  Kept pieces cost $0. Proposals show their cost impact.
+- Research a few budget-friendly mid-century lookalike stores besides West Elm, and add the
+  verified ones to Notion.
 
 **Done when:** adding a row in Notion shows up in the editor's catalog after a sync. Placing it in
-a workspace adds it to that workspace's shopping list with the correct total.
+a workspace adds it to that workspace's shopping list and updates its cost-to-change breakdown and
+total. Marking a Current piece "keep" shows it at $0.
 
 ### P5: Multi-room house + stitching
 - Several rooms in one house, using the room-align tool to snap shared edges (family room → walkway → kitchen/nook).
@@ -301,11 +424,15 @@ appears in the editor ready to confirm, with no manual file transfer.
 
 ---
 
-## 10. Open questions for Michael
+## 11. Open questions for Michael
 
-1. Is a separate **private data repo** (`tmbradley/house-data`) OK, with a one-time token paste on each device? Or are you fine keeping the house data public in this repo?
-2. Which rooms come after the family room, in what order?
-3. Should Current include the furniture you have today (charcoal sectional, swivel chair, TVs) so workspaces can mark pieces as "keep"?
-4. A rough budget per room, for the shopping list to track against?
-5. Favorite stores beyond West Elm for lookalikes (Article, Burrow, Target, IKEA, Facebook Marketplace...)?
-6. Should the bot's inspiration updates edit existing workspaces directly, or create a "proposed" copy for you to accept?
+Answered and folded in: storage (private `house-data` repo), room order (decide as we go),
+existing furniture in Current (yes, with keep / replace / remove), budget (none yet, so
+cost-to-change estimates instead), stores (bot researches them), and bot edits (proposals only).
+
+Still open:
+
+1. The furniture sizes and positions in `house.json` are estimates from photos. Could you measure the
+   sectional (both arms), the swivel chair, the rug, and the two TVs? And which wall are the TVs on?
+2. Do you want to approve proposals from your phone as often as from the laptop? If so, the
+   Proposals panel gets designed phone-first.
