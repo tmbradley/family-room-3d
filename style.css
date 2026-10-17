@@ -95,6 +95,71 @@ label.check input { width: auto; }
 .empty-state { margin-top: 8px; padding: 8px 10px; border: 1px dashed #b98a4e; border-radius: 6px; background: rgba(185, 138, 78, 0.12); font-size: 12px; line-height: 1.4; }
 .overlay { position: fixed; inset: 0; background: rgba(40,30,20,.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .overlay .card { max-width: 320px; text-align: center; padding: 20px; }
+/* Modal dialogs */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-content {
+  background: white;
+  padding: 24px;
+  border-radius: 8px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-content h2 {
+  margin-top: 0;
+}
+
+.code-box {
+  font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+  font-size: 18px;
+  font-weight: 600;
+  text-align: center;
+  padding: 12px;
+  background: #f5f5f5;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin: 12px 0;
+  letter-spacing: 0.5px;
+}
+
+.scan-item {
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.scan-item strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.scan-item .row {
+  margin-top: 8px;
+}
+
+button.secondary {
+  background: #6c757d;
+  color: white;
+  border-color: #6c757d;
+}
+
+button.secondary:hover {
+  background: #5a6268;
+  border-color: #545b62;
+}
+
 #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #2b2622; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 60; max-width: 90vw; }
 #toast.err { background: #a3341f; }
 .readonly .edit-only { display: none !important; }
