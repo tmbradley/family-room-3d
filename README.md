@@ -46,3 +46,24 @@ python3 -m http.server 8000
 - `catalog.js` – furniture catalog (`name, w, d, h` in inches, `color`, optional `url` / `price`) and the default layout.
   Swap this for rows pulled from a Notion database later.
 - `screenshots/` – reference renders
+
+## Server (Railway): P0
+
+The editor and API run as one Node/TypeScript service on Railway (project `house-planner`),
+backed by MySQL and a Railway bucket. See [PLAN.md](PLAN.md) section 6.
+
+- `server/`: Hono app. `index.ts` (routes and static editor), `auth.ts` (passkeys, sessions, agent keys),
+  `house.ts` (house read/export), `export.ts` (nightly JSON export to the bucket), `seed.ts`, `bootstrap.ts`
+- `prisma/schema.prisma`: fully relational MySQL schema. Migrations live in `prisma/migrations/`
+  and run on every deploy (`prisma migrate deploy`).
+- `scripts/`: `seed.ts`, `create-setup-code.ts`, `create-agent-key.ts` (need `DATABASE_URL`)
+- `railway.json`: start command and health check
+
+Routes: `GET /health`, `/login` (passkey sign-in or first-time setup), `/auth/*`,
+`GET /api/house` and `GET /api/export` (session cookie or `Authorization: Bearer <agent key>`),
+`POST /api/export/run` (admin).
+
+House data is never committed here. The seed comes from the private `tmbradley/house-data` repo
+and is passed once through a temporary Railway variable (see `server/bootstrap.ts`).
+
+Local dev: `npm install`, set `DATABASE_URL` to a MySQL database, then `npm run dev` (port 3000).

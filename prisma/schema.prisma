@@ -1,0 +1,751 @@
+// House planner data model (MySQL, fully relational). See PLAN.md section 6.
+// All lengths are integer inches. Money is integer cents. No JSON columns.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum MeasurementSource {
+  manual_estimate
+  measured
+  scan
+}
+
+enum OpeningType {
+  window
+  door
+  open_span
+  fireplace
+}
+
+enum FixtureType {
+  ceiling_fan
+  light
+  outlet
+  switch
+  window_treatment
+  other
+}
+
+enum ItemStatus {
+  idea
+  shortlisted
+  bought
+  existing
+}
+
+enum PlacementAction {
+  existing // a piece in Current
+  keep
+  replace
+  remove
+  new
+}
+
+enum Actor {
+  michael
+  agent
+  system
+}
+
+enum ProposalSourceKind {
+  x_bookmark
+  bot
+  manual
+}
+
+enum ProposalStatus {
+  proposed
+  approved
+  rejected
+  applied
+}
+
+enum ChangeOp {
+  create
+  update
+  delete
+}
+
+enum RevisionKind {
+  seed
+  save
+  proposal
+  rescan
+  rollback
+}
+
+enum CostStepKind {
+  paint
+  outlets
+  lighting
+  window
+  furniture
+  rug
+  decor
+  other
+}
+
+enum UploadKind {
+  scan
+  photo
+  reference
+}
+
+enum UploadFormat {
+  usdz
+  glb
+  roomplan_json
+  jpg
+  heic
+  png
+}
+
+enum UploadStatus {
+  pending
+  uploaded
+  imported
+  rejected
+}
+
+enum AgentScope {
+  read
+  propose
+  admin
+}
+
+enum ChallengeKind {
+  register
+  login
+}
+
+// ---------- House structure (Current) ----------
+
+model House {
+  id              Int      @id @default(autoincrement())
+  name            String   @db.VarChar(120)
+  currentRevision Int      @default(0) @map("current_revision")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  rooms      Room[]
+  workspaces Workspace[]
+  proposals  Proposal[]
+  revisions  Revision[]
+  uploads    Upload[]
+
+  @@map("houses")
+}
+
+model Room {
+  id                Int               @id @default(autoincrement())
+  houseId           Int               @map("house_id")
+  slug              String            @db.VarChar(60)
+  label             String            @db.VarChar(120)
+  originXIn         Int               @default(0) @map("origin_x_in")
+  originYIn         Int               @default(0) @map("origin_y_in")
+  rotationDeg       Int               @default(0) @map("rotation_deg")
+  ceilingIn         Int               @map("ceiling_in")
+  floorMaterial     String?           @map("floor_material") @db.VarChar(80)
+  floorFinish       String?           @map("floor_finish") @db.VarChar(80)
+  floorColor        String?           @map("floor_color") @db.VarChar(9)
+  floorKeep         Boolean           @default(false) @map("floor_keep")
+  wallColorName     String?           @map("wall_color_name") @db.VarChar(60)
+  wallColor         String?           @map("wall_color") @db.VarChar(9)
+  trimColorName     String?           @map("trim_color_name") @db.VarChar(60)
+  trimColor         String?           @map("trim_color") @db.VarChar(9)
+  measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+
+  house          House                @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  walls          Wall[]
+  fixtures       Fixture[]
+  placements     Placement[]
+  workspaceRooms WorkspaceRoom[]
+  styles         WorkspaceRoomStyle[]
+  proposalRooms  ProposalRoom[]
+  uploads        Upload[]
+  inspiration    InspirationRoom[]
+  uploadTokens   UploadToken[]
+
+  @@unique([houseId, slug])
+  @@map("rooms")
+}
+
+model Wall {
+  id                Int               @id @default(autoincrement())
+  roomId            Int               @map("room_id")
+  label             String?           @db.VarChar(60)
+  startXIn          Int               @map("start_x_in")
+  startYIn          Int               @map("start_y_in")
+  endXIn            Int               @map("end_x_in")
+  endYIn            Int               @map("end_y_in")
+  heightIn          Int               @map("height_in")
+  thicknessIn       Int               @default(5) @map("thickness_in")
+  isOpen            Boolean           @default(false) @map("is_open")
+  openTo            String?           @map("open_to") @db.VarChar(80)
+  notes             String?           @db.VarChar(500)
+  measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+
+  room     Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  openings Opening[]
+  fixtures Fixture[]
+  linksA   RoomLink[] @relation("wallA")
+  linksB   RoomLink[] @relation("wallB")
+
+  @@map("walls")
+}
+
+model Opening {
+  id                Int               @id @default(autoincrement())
+  wallId            Int               @map("wall_id")
+  label             String?           @db.VarChar(60)
+  type              OpeningType
+  offsetIn          Int               @map("offset_in") // from the wall's start point
+  widthIn           Int               @map("width_in")
+  sillIn            Int?              @map("sill_in")
+  headIn            Int?              @map("head_in")
+  flush             Boolean           @default(false)
+  treatment         String?           @db.VarChar(120)
+  notes             String?           @db.VarChar(500)
+  measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+
+  wall Wall @relation(fields: [wallId], references: [id], onDelete: Cascade)
+
+  @@map("openings")
+}
+
+model Fixture {
+  id                Int               @id @default(autoincrement())
+  roomId            Int               @map("room_id")
+  wallId            Int?              @map("wall_id")
+  type              FixtureType
+  name              String            @db.VarChar(120)
+  color             String?           @db.VarChar(9)
+  xIn               Int?              @map("x_in")
+  yIn               Int?              @map("y_in")
+  count             Int               @default(1)
+  notes             String?           @db.VarChar(500)
+  measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+
+  room Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  wall Wall? @relation(fields: [wallId], references: [id], onDelete: SetNull)
+
+  @@map("fixtures")
+}
+
+// Two rooms meet along these walls (stitching, P5).
+model RoomLink {
+  id       Int @id @default(autoincrement())
+  wallAId  Int @map("wall_a_id")
+  wallBId  Int @map("wall_b_id")
+  offsetIn Int @default(0) @map("offset_in")
+
+  wallA Wall @relation("wallA", fields: [wallAId], references: [id], onDelete: Cascade)
+  wallB Wall @relation("wallB", fields: [wallBId], references: [id], onDelete: Cascade)
+
+  @@map("room_links")
+}
+
+// Every value ever recorded for a measurable field. Never deleted.
+// Effective value: newest override > newest of scan/measured > manual_estimate.
+model Measurement {
+  id         Int               @id @default(autoincrement())
+  entityType String            @map("entity_type") @db.VarChar(40)
+  entityId   Int               @map("entity_id")
+  field      String            @db.VarChar(60)
+  valueIn    Int               @map("value_in")
+  source     MeasurementSource
+  isOverride Boolean           @default(false) @map("is_override")
+  uploadId   Int?              @map("upload_id")
+  recordedBy Actor             @map("recorded_by")
+  recordedAt DateTime          @default(now()) @map("recorded_at")
+  note       String?           @db.VarChar(500)
+
+  upload Upload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId, field])
+  @@map("measurements")
+}
+
+// ---------- Design workspaces ----------
+
+model Workspace {
+  id               Int      @id @default(autoincrement())
+  houseId          Int      @map("house_id")
+  name             String   @db.VarChar(120)
+  notes            String?  @db.Text
+  baseRevision     Int      @default(0) @map("base_revision")
+  revision         Int      @default(0)
+  createdBy        Actor    @map("created_by")
+  sourceProposalId Int?     @unique @map("source_proposal_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  house              House                @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  sourceProposal     Proposal?            @relation("createdFrom", fields: [sourceProposalId], references: [id], onDelete: SetNull)
+  rooms              WorkspaceRoom[]
+  styles             WorkspaceRoomStyle[]
+  structureOverrides StructureOverride[]
+  placements         Placement[]
+  targetedBy         Proposal[]           @relation("target")
+  revisions          Revision[]
+  costEstimates      CostEstimate[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceRoom {
+  workspaceId Int @map("workspace_id")
+  roomId      Int @map("room_id")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, roomId])
+  @@map("workspace_rooms")
+}
+
+model WorkspaceRoomStyle {
+  workspaceId Int     @map("workspace_id")
+  roomId      Int     @map("room_id")
+  wallColor   String? @map("wall_color") @db.VarChar(9)
+  trimColor   String? @map("trim_color") @db.VarChar(9)
+  floorColor  String? @map("floor_color") @db.VarChar(9)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, roomId])
+  @@map("workspace_room_styles")
+}
+
+model StructureOverride {
+  id          Int    @id @default(autoincrement())
+  workspaceId Int    @map("workspace_id")
+  entityType  String @map("entity_type") @db.VarChar(40)
+  entityId    Int?   @map("entity_id")
+  field       String @db.VarChar(60)
+  value       String @db.VarChar(1000)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("structure_overrides")
+}
+
+// ---------- Furniture ----------
+
+model Store {
+  id    Int     @id @default(autoincrement())
+  name  String  @db.VarChar(120)
+  url   String? @db.VarChar(500)
+  notes String? @db.VarChar(1000)
+
+  items FurnitureItem[]
+
+  @@map("stores")
+}
+
+model FurnitureItem {
+  id                Int               @id @default(autoincrement())
+  slug              String?           @unique @db.VarChar(80)
+  kind              String            @db.VarChar(40)
+  name              String            @db.VarChar(160)
+  wIn               Int               @map("w_in")
+  dIn               Int               @map("d_in")
+  hIn               Int               @map("h_in")
+  color             String?           @db.VarChar(9)
+  accentColor       String?           @map("accent_color") @db.VarChar(9)
+  storeId           Int?              @map("store_id")
+  url               String?           @db.VarChar(1000)
+  priceCents        Int?              @map("price_cents")
+  imageUrl          String?           @map("image_url") @db.VarChar(1000)
+  status            ItemStatus        @default(idea)
+  notes             String?           @db.VarChar(1000)
+  measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  store      Store?         @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  placements Placement[]
+  costItems  CostStepItem[]
+
+  @@map("furniture_items")
+}
+
+model Placement {
+  id                  Int               @id @default(autoincrement())
+  workspaceId         Int?              @map("workspace_id") // NULL = Current
+  roomId              Int               @map("room_id")
+  itemId              Int               @map("item_id")
+  xIn                 Int               @map("x_in")
+  yIn                 Int               @map("y_in")
+  rotationDeg         Int               @default(0) @map("rotation_deg")
+  action              PlacementAction
+  replacesPlacementId Int?              @map("replaces_placement_id")
+  notes               String?           @db.VarChar(500)
+  measurementStatus   MeasurementSource @default(manual_estimate) @map("measurement_status")
+
+  workspace  Workspace?     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room       Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  item       FurnitureItem  @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  replaces   Placement?     @relation("replaces", fields: [replacesPlacementId], references: [id], onDelete: SetNull)
+  replacedBy Placement[]    @relation("replaces")
+  costItems  CostStepItem[]
+
+  @@map("placements")
+}
+
+// ---------- Proposals and history ----------
+
+model Proposal {
+  id                Int                @id @default(autoincrement())
+  houseId           Int                @map("house_id")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  createdBy         Actor              @map("created_by")
+  agentKeyId        Int?               @map("agent_key_id")
+  sourceKind        ProposalSourceKind @map("source_kind")
+  sourceUrl         String?            @map("source_url") @db.VarChar(1000)
+  sourceImageUrl    String?            @map("source_image_url") @db.VarChar(1000)
+  inspirationId     Int?               @map("inspiration_id")
+  targetWorkspaceId Int?               @map("target_workspace_id") // NULL = new workspace
+  newWorkspaceName  String?            @map("new_workspace_name") @db.VarChar(120)
+  title             String             @db.VarChar(200)
+  rationale         String?            @db.Text
+  costLowCents      Int?               @map("cost_low_cents")
+  costHighCents     Int?               @map("cost_high_cents")
+  status            ProposalStatus     @default(proposed)
+  decidedAt         DateTime?          @map("decided_at")
+  decisionNote      String?            @map("decision_note") @db.VarChar(1000)
+  baseRevision      Int                @default(0) @map("base_revision")
+
+  house            House             @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  agentKey         AgentKey?         @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+  inspiration      Inspiration?      @relation(fields: [inspirationId], references: [id], onDelete: SetNull)
+  targetWorkspace  Workspace?        @relation("target", fields: [targetWorkspaceId], references: [id], onDelete: SetNull)
+  createdWorkspace Workspace?        @relation("createdFrom")
+  rooms            ProposalRoom[]
+  changes          ProposalChange[]
+  comments         ProposalComment[]
+  revisions        Revision[]
+
+  @@index([status])
+  @@map("proposals")
+}
+
+model ProposalRoom {
+  proposalId Int @map("proposal_id")
+  roomId     Int @map("room_id")
+
+  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([proposalId, roomId])
+  @@map("proposal_rooms")
+}
+
+// One row per changed field.
+model ProposalChange {
+  id          Int      @id @default(autoincrement())
+  proposalId  Int      @map("proposal_id")
+  seq         Int
+  op          ChangeOp
+  entityType  String   @map("entity_type") @db.VarChar(40)
+  entityId    Int?     @map("entity_id")
+  tempRef     String?  @map("temp_ref") @db.VarChar(40)
+  field       String?  @db.VarChar(60)
+  beforeValue String?  @map("before_value") @db.VarChar(1000)
+  afterValue  String?  @map("after_value") @db.VarChar(1000)
+
+  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@index([proposalId, seq])
+  @@map("proposal_changes")
+}
+
+model ProposalComment {
+  id         Int      @id @default(autoincrement())
+  proposalId Int      @map("proposal_id")
+  author     Actor
+  agentKeyId Int?     @map("agent_key_id")
+  body       String   @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  proposal Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  agentKey AgentKey? @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+
+  @@map("proposal_comments")
+}
+
+// Append-only. scope = "current" or "workspace:<id>".
+model Revision {
+  id                  Int          @id @default(autoincrement())
+  houseId             Int          @map("house_id")
+  workspaceId         Int?         @map("workspace_id")
+  scope               String       @db.VarChar(40)
+  number              Int
+  createdAt           DateTime     @default(now()) @map("created_at")
+  actor               Actor
+  agentKeyId          Int?         @map("agent_key_id")
+  kind                RevisionKind
+  proposalId          Int?         @map("proposal_id")
+  rollsBackRevisionId Int?         @map("rolls_back_revision_id")
+  note                String?      @db.VarChar(1000)
+
+  house        House            @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  workspace    Workspace?       @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  agentKey     AgentKey?        @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+  proposal     Proposal?        @relation(fields: [proposalId], references: [id], onDelete: SetNull)
+  rollsBack    Revision?        @relation("rollback", fields: [rollsBackRevisionId], references: [id], onDelete: Restrict)
+  rolledBackBy Revision[]       @relation("rollback")
+  changes      RevisionChange[]
+
+  @@unique([houseId, scope, number])
+  @@map("revisions")
+}
+
+model RevisionChange {
+  id          Int      @id @default(autoincrement())
+  revisionId  Int      @map("revision_id")
+  seq         Int
+  op          ChangeOp
+  entityType  String   @map("entity_type") @db.VarChar(40)
+  entityId    Int      @map("entity_id")
+  field       String?  @db.VarChar(60)
+  beforeValue String?  @map("before_value") @db.VarChar(1000)
+  afterValue  String?  @map("after_value") @db.VarChar(1000)
+
+  revision Revision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+
+  @@index([revisionId, seq])
+  @@index([entityType, entityId, field])
+  @@map("revision_changes")
+}
+
+// ---------- Cost to change ----------
+
+model CostEstimate {
+  id             Int      @id @default(autoincrement())
+  workspaceId    Int      @map("workspace_id")
+  totalLowCents  Int      @map("total_low_cents")
+  totalHighCents Int      @map("total_high_cents")
+  revision       Int
+  computedAt     DateTime @default(now()) @map("computed_at")
+
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  steps     CostStep[]
+
+  @@map("cost_estimates")
+}
+
+model CostStep {
+  id          Int          @id @default(autoincrement())
+  estimateId  Int          @map("estimate_id")
+  step        CostStepKind
+  sort        Int
+  changesText String       @map("changes_text") @db.VarChar(1000)
+  lowCents    Int          @map("low_cents")
+  highCents   Int          @map("high_cents")
+
+  estimate CostEstimate   @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  items    CostStepItem[]
+
+  @@map("cost_steps")
+}
+
+model CostStepItem {
+  id          Int    @id @default(autoincrement())
+  stepId      Int    @map("step_id")
+  placementId Int?   @map("placement_id")
+  itemId      Int?   @map("item_id")
+  label       String @db.VarChar(200)
+  lowCents    Int    @map("low_cents")
+  highCents   Int    @map("high_cents")
+
+  step      CostStep       @relation(fields: [stepId], references: [id], onDelete: Cascade)
+  placement Placement?     @relation(fields: [placementId], references: [id], onDelete: SetNull)
+  item      FurnitureItem? @relation(fields: [itemId], references: [id], onDelete: SetNull)
+
+  @@map("cost_step_items")
+}
+
+// ---------- Files and inspiration ----------
+
+model Upload {
+  id         Int          @id @default(autoincrement())
+  houseId    Int          @map("house_id")
+  roomId     Int?         @map("room_id")
+  kind       UploadKind
+  format     UploadFormat
+  bucketKey  String       @unique @map("bucket_key") @db.VarChar(500)
+  bytes      Int?
+  status     UploadStatus @default(pending)
+  uploadedBy Actor        @map("uploaded_by")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  house        House         @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  room         Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  measurements Measurement[]
+
+  @@map("uploads")
+}
+
+model Inspiration {
+  id           Int       @id @default(autoincrement())
+  xPostId      String?   @unique @map("x_post_id") @db.VarChar(40)
+  url          String    @db.VarChar(1000)
+  authorHandle String?   @map("author_handle") @db.VarChar(80)
+  postText     String?   @map("post_text") @db.Text
+  bookmarkedAt DateTime? @map("bookmarked_at")
+  classifiedAt DateTime? @map("classified_at")
+  isDesign     Boolean   @default(true) @map("is_design")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  media     InspirationMedia[]
+  rooms     InspirationRoom[]
+  proposals Proposal[]
+
+  @@map("inspiration")
+}
+
+model InspirationMedia {
+  id            Int    @id @default(autoincrement())
+  inspirationId Int    @map("inspiration_id")
+  url           String @db.VarChar(1000)
+  type          String @db.VarChar(20)
+
+  inspiration Inspiration @relation(fields: [inspirationId], references: [id], onDelete: Cascade)
+
+  @@map("inspiration_media")
+}
+
+model InspirationRoom {
+  inspirationId Int @map("inspiration_id")
+  roomId        Int @map("room_id")
+
+  inspiration Inspiration @relation(fields: [inspirationId], references: [id], onDelete: Cascade)
+  room        Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([inspirationId, roomId])
+  @@map("inspiration_rooms")
+}
+
+model Export {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now()) @map("created_at")
+  bucketKey String?  @map("bucket_key") @db.VarChar(500)
+  bytes     Int?
+  status    String   @db.VarChar(20)
+  error     String?  @db.VarChar(1000)
+
+  @@map("exports")
+}
+
+// ---------- Auth ----------
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(120)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  passkeys      Passkey[]
+  sessions      Session[]
+  recoveryCodes RecoveryCode[]
+
+  @@map("users")
+}
+
+model Passkey {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @map("user_id")
+  credentialId String    @unique @map("credential_id") @db.VarChar(255)
+  publicKey    Bytes     @map("public_key") @db.Blob
+  counter      Int       @default(0)
+  transports   String?   @db.VarChar(200)
+  deviceName   String?   @map("device_name") @db.VarChar(120)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastUsedAt   DateTime? @map("last_used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("passkeys")
+}
+
+model Session {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  tokenHash  String   @unique @map("token_hash") @db.Char(64)
+  createdAt  DateTime @default(now()) @map("created_at")
+  expiresAt  DateTime @map("expires_at")
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model SetupCode {
+  id        Int       @id @default(autoincrement())
+  codeHash  String    @unique @map("code_hash") @db.Char(64)
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+
+  @@map("setup_codes")
+}
+
+model RecoveryCode {
+  id        Int       @id @default(autoincrement())
+  userId    Int       @map("user_id")
+  codeHash  String    @unique @map("code_hash") @db.Char(64)
+  createdAt DateTime  @default(now()) @map("created_at")
+  usedAt    DateTime? @map("used_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("recovery_codes")
+}
+
+model AuthChallenge {
+  id          Int           @id @default(autoincrement())
+  tokenHash   String        @unique @map("token_hash") @db.Char(64)
+  kind        ChallengeKind
+  challenge   String        @db.VarChar(255)
+  setupCodeId Int?          @map("setup_code_id")
+  userId      Int?          @map("user_id")
+  expiresAt   DateTime      @map("expires_at")
+
+  @@map("auth_challenges")
+}
+
+model AgentKey {
+  id         Int        @id @default(autoincrement())
+  name       String     @db.VarChar(120)
+  prefix     String     @db.VarChar(20)
+  keyHash    String     @unique @map("key_hash") @db.Char(64)
+  scope      AgentScope
+  createdAt  DateTime   @default(now()) @map("created_at")
+  lastUsedAt DateTime?  @map("last_used_at")
+  revokedAt  DateTime?  @map("revoked_at")
+
+  proposals Proposal[]
+  comments  ProposalComment[]
+  revisions Revision[]
+
+  @@map("agent_keys")
+}
+
+model UploadToken {
+  id        Int       @id @default(autoincrement())
+  tokenHash String    @unique @map("token_hash") @db.Char(64)
+  roomId    Int?      @map("room_id")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+
+  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@map("upload_tokens")
+}
