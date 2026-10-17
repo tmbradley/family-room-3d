@@ -574,8 +574,10 @@ test-room workspace with measurement sources, an unauthenticated request gets `4
   (scans/estimates are still recorded for history). API: `POST /api/measurements` (`action: measured | pin`),
   `POST /api/measurements/unpin`.
 - MCP server at `/mcp` (section 10). Schema changes in migration `0003_p1_proposals_pins`.
-- Deploys run `npm run db:predeploy` as Railway's pre-deploy command: a JSON snapshot of every table to the
-  bucket (`backups/predeploy-*.json`), then `prisma migrate deploy`. If it fails, the old version keeps serving.
+- Every container start runs `npm run db:predeploy` before the server: a JSON snapshot of every table to the
+  bucket (`backups/predeploy-*.json`), then `prisma migrate deploy`. If it fails, the container exits, the
+  /health check never passes, and Railway keeps the old version serving. (Railway's `preDeployCommand` in
+  railway.json was not picked up by `railway up`, so it lives in `npm start` instead.)
 - Tests: `TEST_DATABASE_URL=mysql://… npm test` against a new empty MySQL database (`tests/p1.test.ts`):
   approve/reject/stale/rollback, pin protection, new-workspace proposals, scopes, and MCP.
 - Not done yet: importing `house-data/proposals/` files (there are none) and `designs.json`; proposal

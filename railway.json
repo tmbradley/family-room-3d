@@ -7,9 +7,6 @@
     "startCommand": "npm start",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 120,
-    "restartPolicyType": "ON_FAILURE",
-    "preDeployCommand": [
-      "npm run db:predeploy"
-    ]
+    "restartPolicyType": "ON_FAILURE"
   }
 }

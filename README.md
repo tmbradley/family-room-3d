@@ -35,7 +35,7 @@ Where this is headed: [PLAN.md](PLAN.md).
   - `workspaces.ts` views and copies, `proposals.ts` proposals, `measurements.ts` measurements and pins
   - `mcp.ts` MCP server at `/mcp`; `house.ts`, `export.ts`, `seed.ts`, `bootstrap.ts`
 - `prisma/`: fully relational MySQL schema and migrations
-- `scripts/`: `predeploy.ts` (Railway pre-deploy: table snapshot to the bucket, then `prisma migrate deploy`),
+- `scripts/`: `predeploy.ts` (runs on every start: table snapshot to the bucket, then `prisma migrate deploy`),
   `seed.ts`, `create-setup-code.ts`, `create-agent-key.ts`
 - `tests/`: `npm test` (needs `TEST_DATABASE_URL` pointing at a new, empty MySQL database)
 
