@@ -8,6 +8,10 @@ Each phase lists what gets built and how we'll know it's done. Decisions made so
 
 **Rooms:** there's no fixed order after the family room. **Decided:** we pick the next room as we go.
 
+**Devices (Decided):** viewing and editing are **web-first**: a responsive web app that works in
+desktop and phone browsers. The iOS **App Clip is phone-first** and only for scanning rooms and
+taking photos.
+
 ---
 
 ## 1. Vision
@@ -23,8 +27,9 @@ A planner for redesigning the house one room at a time, using real dimensions.
 
 ### Where we are today
 
-A static three.js editor (no build step, three.js loaded from a CDN with an import map), live at
-<https://tmbradley.github.io/family-room-3d/>. It models one room:
+A static three.js editor (no build step, three.js loaded from a CDN with an import map), currently
+live on GitHub Pages at <https://tmbradley.github.io/family-room-3d/>. Once the Railway version is
+live, the editor is served only from Railway and Pages gets turned off (section 6). It models one room:
 
 - Family room: 12 ft wide × 13 ft deep, 9 ft ceilings
 - Flush 5 ft fireplace centered on the left wall (4 ft + 5 ft + 4 ft)
@@ -39,8 +44,13 @@ A static three.js editor (no build step, three.js loaded from a CDN with an impo
 ## 2. Core model: "Current" plus design workspaces
 
 - **Current:** the house as it is today. That means walls, openings, ceiling heights, floor and
-  wall colors, fixtures, and **the furniture that's there now** (Decided). It comes from scans or manual entry. It's **locked** in normal
+  wall colors, fixtures, and **the furniture that's there now** (Decided). It's **locked** in normal
   use and only changes on purpose, like after a rescan or a measurement fix.
+- **Measurements start rough and get refined (Decided).** We start with rough measurements entered
+  by hand. Tape measurements and, later, scans refine them. Every dimension and position keeps
+  track of where its value came from (`manual_estimate`, `measured`, or `scan`). A **manual
+  override always wins over a scan value**, and the full history of values is kept (section 6,
+  "Measurement provenance").
 - **Workspaces:** design ideas copied from Current, like "Classic MCM" or "Moody den." A workspace
   can cover one room or several. Inside it you can move furniture, change colors, and swap pieces
   without touching Current or any other workspace.
@@ -94,13 +104,11 @@ Edits snap to 1" by default (toggle off for free placement). Every edit can be u
 
 ## 5. Furniture and shopping lists
 
-- **Catalog:** furniture lives in the `furniture_items` table in MySQL (section 6). Each item is
-  one piece: name, kind (sofa, chair, table, rug, lamp, ...), width, depth, and height in inches,
-  color, store, product URL, price, image, and a status like idea / shortlisted / bought.
-- **Notion (optional):** Michael's private ("personal") Notion can be a friendly view or editor for
-  the catalog and shopping lists, synced by the bot. Whether Notion stays in the loop is an open
-  question (section 11). The "personal" connection currently signs into the Classroom Mosaic workspace
-  and needs a fresh sign-in either way. Until P4, `catalog.js` stays the source.
+- **Catalog (Decided: MySQL only):** furniture, shopping lists, and cost estimates all live in
+  MySQL (section 6). There's no outside sync. Each item is one piece: name, kind (sofa, chair,
+  table, rug, lamp, ...), width, depth, and height in inches, color, store, product URL, price,
+  image, and a status like idea / shortlisted / bought. Items are added in the editor, or by
+  agents through the MCP server (section 10). Until P4, `catalog.js` stays the source.
 - **Shopping list per workspace:** every piece placed in a workspace that isn't already in Current,
   with link, price, quantity, and a total. Pieces marked "keep" from Current show as $0.
   Exportable as CSV.
@@ -148,24 +156,23 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
 ### Pieces
 
 ```
- iPhone / laptop browser            Bot (daily routine, edits)        iOS App Clip (later)
-        │  session cookie                 │  bot API key                    │  upload token
+ Phone / laptop browser             AI agents incl. this bot          iOS App Clip (later)
+        │  session cookie                 │  agent API key (MCP)            │  upload token
         ▼                                 ▼                                 ▼
- ┌──────────────────────────── Railway project "house-planner" ─────────────────────────────┐
- │  web+api service (Node + TypeScript, Hono)  ──►  MySQL     (house, workspaces, proposals) │
- │        serves the static editor + /api/*    ──►  Bucket    (scans, photos)                │
+ ┌──────────────────────── new Railway project "house-planner" (*.up.railway.app) ──────────┐
+ │  one service (Node + TypeScript, Hono)      ──►  MySQL     (house, workspaces, proposals) │
+ │   serves the editor, /api/* (REST), /mcp    ──►  Bucket    (scans, photos)                │
  └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Editor:** stays a static three.js app with no build step. Two ways to host it:
-
-  | Option | Pros | Cons |
-  |---|---|---|
-  | **Served by the Railway service** (recommended) | Same origin as the API, so login is a plain first-party cookie with no cross-site cookie problems in iPhone Safari. One deploy, one URL. | The editor is no longer on GitHub Pages (Pages can keep a read-only demo). |
-  | GitHub Pages + API on Railway | Free static hosting, already live. | Different site from the API. Safari blocks cross-site cookies, so it needs either a custom domain with both on subdomains of one domain, or bearer tokens kept in the browser (less safe). |
-
-  Recommendation: serve it from Railway, from the same repo's static files. Keep the Pages site as
-  a public read-only demo with the default layout.
+- **Railway project (Decided):** a **new** Railway project in Michael's account. Which workspace
+  it goes in gets decided at setup time.
+- **URL (Decided):** the default `*.up.railway.app` address for now. A custom domain may come later.
+- **Editor hosting (Decided): served only from Railway**, by the same service as the API. It stays a
+  static three.js app with no build step and a responsive layout for desktop and phone browsers.
+  Being on the same site as the API means login is a plain first-party cookie that iPhone Safari won't block.
+- **GitHub Pages goes away.** Once the Railway version is live and checked, turn off Pages on
+  `tmbradley/family-room-3d` (P0 step). It stays on until then.
 
 - **API server: Node + TypeScript with [Hono](https://hono.dev).** It's small, TypeScript-first, built on
   web standards (Request/Response), and runs well on Node on Railway. It has built-in middleware for
@@ -180,10 +187,12 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
   codes cover a lost device. Magic links were considered, but they need an email provider and add a
   mail round trip on the phone.
 
-- **Bot access:** a separate API key (`BOT_API_KEY`), stored as a Railway env var on the server and
-  as a bot secret on the bot side. The key is limited to reading everything and **creating
-  proposals, inspiration rows, and catalog syncs**. It can't approve proposals or change Current. Every
-  bot write is tagged `actor = 'bot'`.
+- **Agent access:** AI agents, including this bot, use the **MCP server** at `/mcp` on the same
+  service (section 10), with **scoped agent API keys** (`read`, `propose`, `admin`). Keys are
+  created by Michael and stored hashed in the `agent_keys` table. The bot keeps its key as a bot
+  secret. By default agents get `propose`: they can read, add catalog items and inspiration, and
+  create proposals, but they can't approve proposals or edit Current. Every agent write records which
+  key made it.
 
 - **File storage: Railway's S3-compatible bucket (object storage)**, not a volume. A bucket isn't
   tied to one service, lets the App Clip and browser upload directly with presigned URLs, and egress
@@ -213,6 +222,25 @@ Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 - **Furniture placements** store `x_in, y_in` (center, room-local), `rotation_deg`, and `room_id`.
   Sizes come from the furniture item.
 
+**Measurement provenance (manual estimate → measured → scan, manual override wins)**
+
+- The columns on `walls`, `openings`, `rooms`, `fixtures`, `furniture_items`, and `placements` hold
+  the **effective** value the editor uses. Each of those rows also has a `measurement_status` column
+  holding the least reliable source among its fields, which drives a quick "rough" badge.
+- Every value ever recorded for a measurable field is a row in **`measurements`**: entity type, entity
+  id, field (e.g. `end_x_in`, `width_in`), `value_in`, `source` (`manual_estimate` / `measured` /
+  `scan`), `is_override`, `upload_id` (which scan it came from), who recorded it, when, and a note.
+  Rows are never deleted, so provenance is kept.
+- **Which value wins:** (1) the newest **manual override** (`is_override = 1`, always entered by
+  hand) beats everything. (2) Otherwise the newest **scan** or **measured** value; if both exist, the
+  newer one wins, and the UI shows when they differ by more than 1". (3) Otherwise the
+  `manual_estimate`.
+- So a rescan never clobbers a number Michael pinned with a tape measure. It's recorded and shown
+  as "scan: 155 in, pinned: 156 in", and he can clear the override to accept the scan.
+- Changing the effective value writes a normal revision (below), so it can be undone like any edit.
+- Seed data from `house.json` comes in as `manual_estimate`. The confirmed room dimensions (12 × 13 ft,
+  fireplace, window) come in as `measured`.
+
 **Tables**
 
 | Table | Columns (FK → table) | Notes |
@@ -226,14 +254,16 @@ Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 | `workspaces` | id, house_id → houses, name, notes, base_revision, revision, created_by (michael/bot), source_proposal_id → proposals (nullable) | Base is always Current. `base_revision` = the Current revision it was last reconciled with. |
 | `workspace_rooms` | workspace_id → workspaces, room_id → rooms | Which rooms a workspace covers (many-to-many). |
 | `workspace_room_styles` | workspace_id, room_id, wall_color, trim_color, floor_color | Per-design color overrides. Missing = same as Current. |
+| `measurements` | id, entity_type, entity_id, field, value_in, source (manual_estimate/measured/scan), is_override, upload_id → uploads (nullable), recorded_by, recorded_at, note | Provenance for every dimension and position. Never deleted. |
 | `structure_overrides` | id, workspace_id, entity_type (wall/opening), entity_id (nullable for added), field, value | Optional "what if" structure edits inside a design (P3+). |
 | `stores` | id, name, url, notes | Filled in after the store research. |
-| `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store_id → stores, url, price_cents, image_url, status (idea/shortlisted/bought/existing), notion_page_id | The catalog. Current's furniture is items with status `existing`. |
+| `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store_id → stores, url, price_cents, image_url, status (idea/shortlisted/bought/existing), measurement_status | The catalog. Current's furniture is items with status `existing`. |
 | `placements` | id, workspace_id → workspaces (NULL = Current), room_id → rooms, item_id → furniture_items, x_in, y_in, rotation_deg, action (keep/replace/remove/new), replaces_placement_id → placements | Keep/replace/remove decisions on Current's pieces live here. |
 | `proposals` | id, house_id, created_at, created_by, source_kind (x_bookmark/bot/manual), source_url, source_image_url, inspiration_id → inspiration, target_workspace_id → workspaces (NULL = new), new_workspace_name, title, rationale, cost_low_cents, cost_high_cents, status (proposed/approved/rejected/applied), decided_at, decision_note, base_revision | |
 | `proposal_rooms` | proposal_id, room_id | Target room(s). |
+| `proposal_comments` | id, proposal_id → proposals, author (michael or agent key id), body, created_at | Discussion on a proposal (MCP `comment_on_proposal`). |
 | `proposal_changes` | id, proposal_id → proposals, seq, op (create/update/delete), entity_type (placement/opening/wall/room_style/…), entity_id (NULL for create), field, before_value, after_value, temp_ref | **One row per field change.** A new piece is one `create` with a `temp_ref` plus one row per field. |
-| `revisions` | id, house_id, workspace_id (NULL = Current), number, created_at, actor (michael/bot), kind (save/proposal/rescan/rollback/seed), proposal_id → proposals, rolls_back_revision_id → revisions, note | **Append-only.** Unique (workspace_id, number). |
+| `revisions` | id, house_id, workspace_id (NULL = Current), number, created_at, actor (michael / agent key id), kind (save/proposal/rescan/rollback/seed), proposal_id → proposals, rolls_back_revision_id → revisions, note | **Append-only.** Unique (workspace_id, number). |
 | `revision_changes` | id, revision_id → revisions, seq, op, entity_type, entity_id, field, before_value, after_value | Same shape as `proposal_changes`. Append-only. |
 | `cost_estimates` | id, workspace_id → workspaces, total_low_cents, total_high_cents, computed_at, revision | Latest estimate per design. |
 | `cost_steps` | id, estimate_id → cost_estimates, step (paint/outlets/lighting/window/furniture/rug/decor/other), sort, changes_text, low_cents, high_cents | One row per step. |
@@ -242,6 +272,7 @@ Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 | `inspiration` | id, x_post_id (unique), url, author_handle, post_text, bookmarked_at, classified_at, is_design | One row per X bookmark the routine handled. |
 | `inspiration_media` | id, inspiration_id → inspiration, url, type | Images and video on the post. |
 | `inspiration_rooms` | inspiration_id, room_id | The room(s) it was matched to. |
+| `agent_keys` | id, name, key_hash, scope (read/propose/admin), created_at, last_used_at, revoked_at | MCP keys. Only the hash is stored. |
 | `users`, `passkeys`, `sessions`, `upload_tokens` | the usual | Auth. One user. |
 
 `before_value` / `after_value` are `VARCHAR` holding the field's value as text (a number of inches,
@@ -268,8 +299,8 @@ directly, and it's the easier one to read and maintain.
   so they can be reversed.
 - **Approving a proposal** copies its `proposal_changes` into a new revision (`kind = 'proposal'`,
   linked by `proposal_id`) and marks the proposal `applied`.
-- **History list:** read `revisions` for a workspace, newest first, with who did it (Michael, or the
-  bot via an approved proposal) and why.
+- **History list:** read `revisions` for a workspace, newest first, with who did it (Michael, or an
+  agent via an approved proposal) and why.
 - **Undo one change:** build a new revision (`kind = 'rollback'`, `rolls_back_revision_id` set) whose
   changes are the original's rows reversed: swap before and after, create ↔ delete, applied in reverse
   `seq` order. It's refused, and shown as a conflict, if a later revision changed the same
@@ -296,9 +327,9 @@ directly, and it's the easier one to read and maintain.
   as the **export/import format** for the whole house (Current, workspaces, placements).
 - After that it becomes an **optional backup/export** target. A nightly job (or a button) exports the
   whole house to JSON and commits it there. If we decide backups aren't needed, the repo gets archived.
-- **Until the API exists**, the bot's X bookmark routine writes proposals as JSON files to
-  `house-data/proposals/`. Once the API is up (P1), it switches to `POST /api/proposals`, and those
-  files are imported into the `proposals` table.
+- **Until the MCP server exists**, the bot's X bookmark routine writes proposals as JSON files to
+  `house-data/proposals/`. Once the MCP server is up (P1), it switches to the `create_proposal` tool,
+  and those files are imported into the `proposals` table.
 
 ### Rough Railway cost (estimate)
 
@@ -309,14 +340,14 @@ workspace with $20 included.
 
 | Item | Rough monthly use | Est. cost |
 |---|---|---|
-| Web+API service (idle most of the day, ~100–150 MB RAM) | | $1 – $2 |
+| Web + API + MCP service (idle most of the day, ~100–150 MB RAM) | | $1 – $2 |
 | MySQL (~300–450 MB RAM, ~1 GB disk) | | $3 – $4.50 |
 | Bucket (a few GB of scans and photos) | | < $0.10 |
 | **Usage total** | | **≈ $4 – $7 / month** |
 
-On Hobby that's mostly covered by the $5 included, so about **$5–8/month all-in**. If it goes in
-Michael's existing Railway workspace, it shares that plan's included credit with his other projects, so
-the extra cost is just the usage, about $4–7. *These are estimates. Actual cost depends on RAM use,
+On Hobby that's mostly covered by the $5 included, so about **$5–8/month all-in**. If the new project
+goes in a workspace that already pays for a plan, it shares that plan's included credit with his other
+projects, so the extra cost is just the usage, about $4–7. *These are estimates. Actual cost depends on RAM use,
 which we'll check after P0.*
 
 ---
@@ -325,7 +356,7 @@ which we'll check after P0.*
 
 **Rule:** inspiration from the X bookmark routine, and any other bot suggestion, **never edits a
 design directly**. It creates a **proposal** (a change request). Only Michael applies changes,
-by approving them. The bot's API key can create proposals but can't approve them.
+by approving them. Agent keys with `propose` scope can create proposals but can't approve them.
 
 **What a proposal contains** (a row in `proposals`; before the API exists, a file in `house-data/proposals/`):
 
@@ -350,6 +381,8 @@ by approving them. The bot's API key can create proposals but can't approve them
 - If the workspace changed since the proposal was written (its `base_revision` is behind) and a
   "before" value no longer matches, the editor flags it and won't apply it blindly. You can still
   apply the parts that match, or reject it.
+- Comments from Michael or agents show in a thread on the proposal.
+- The panel is responsive. On a phone, the before/after stacks top and bottom.
 
 **History and rollback:** every applied proposal and every save is an append-only revision
 (section 6). Each workspace and Current has a History list with undo and restore.
@@ -367,11 +400,14 @@ on LiDAR iPhones, then export and upload in the editor:
   and openings, checks it against known measurements (for example the family room's 12 × 13 ft), and
   lets you place it with the room-align tool. Nothing changes Current until you confirm, which is
   then a `rescan` revision.
+- Every scanned value is stored in `measurements` with `source = scan`. Manual overrides still win,
+  and differences over 1" are listed for review.
 
-**Step 2: iOS App Clip for scanning.**
+**Step 2: iOS App Clip for scanning and photos (phone-first).**
 
 - What's available: an Apple Developer account, a LiDAR iPhone Pro, and a Mac with Xcode set up.
-- Flow: tap "Scan room" in the web app (or scan a QR code) → the App Clip opens → RoomPlan scan →
+- Flow: tap "Scan room" in the web app (or scan a QR code) → the App Clip opens → RoomPlan scan,
+  then the clip prompts for 4–6 photos →
   the clip asks the **Railway API** for a presigned upload URL, uploads the RoomPlan JSON / USDZ to
   the bucket, and registers it → the editor shows it as ready to import.
 - Auth for the clip: the "Scan room" link carries a short-lived, single-use upload token created by
@@ -406,53 +442,108 @@ fireplace finish. Photos are stored as `uploads` too.
 - **Now:** designs are noted in the bot's store
   (`/cursor/stores/store-87e031d1-b2f2-435c-b46f-6636a178fa2c/home-design/designs.json`), and
   proposals are written as JSON files to `tmbradley/house-data/proposals/`.
-- **Once the API exists (P1):** the routine calls `POST /api/inspiration` and `POST /api/proposals`
-  with the bot API key. The existing files and `designs.json` entries are imported once as proposals
+- **Once the MCP server exists (P1):** the routine connects to it as a custom MCP connector and calls
+  `add_inspiration` and `create_proposal` with its `propose`-scope key. The existing files and `designs.json` entries are imported once as proposals
   (mostly "new workspace"), not applied directly. Any that need furniture get placeholder catalog
   pieces, labeled as placeholders.
 - Workspaces created or changed by an approved proposal link back to it in their History.
 
 ---
 
-## 10. Phased roadmap
+## 10. MCP server for AI agents (Decided)
+
+An MCP (Model Context Protocol) server lets AI agents, including this bot, read and work with the
+house data through a defined set of tools instead of raw database access.
+
+- **Where:** the same Railway service, at `/mcp`, using remote MCP over **Streamable HTTP**. It's
+  built with the official MCP TypeScript SDK and mounted in the Hono app. It calls the same service
+  layer as the REST API, so the rules (proposals only, revisions, conflict checks) are enforced in
+  one place.
+- **Auth:** `Authorization: Bearer <agent key>`. Keys are created and revoked by Michael in the
+  editor (Settings → Agent keys) and stored hashed. Each key has one scope:
+
+  | Scope | Can do |
+  |---|---|
+  | `read` | All `list_*` / `get_*` / `search_*` tools, `export_house` |
+  | `propose` (default) | `read`, plus `create_proposal`, `comment_on_proposal`, `add_furniture_item`, `add_inspiration`, `upload_reference_image` |
+  | `admin` | `propose`, plus `approve_proposal`, `reject_proposal`, `apply_proposal`, `edit_current`, `rollback_revision`. Normally this is Michael's job in the editor, so no admin key is issued by default. |
+
+- **This bot** connects to it as a **custom MCP connector** with a `propose` key kept as a bot secret.
+  The daily X bookmark routine moves onto it in P1.
+- **Tools (sketch):**
+
+  | Tool | What it does |
+  |---|---|
+  | `list_houses` | Houses the key can see (one for now) |
+  | `get_house` | House summary: rooms, workspace list, open proposal count |
+  | `get_room` | One room with walls, openings, fixtures, and placements (Current or a given workspace), with measurement sources |
+  | `list_workspaces` / `get_workspace` | Designs, with rooms, colors, placements, and keep/replace/remove decisions |
+  | `list_furniture` / `search_furniture` | Catalog, filtered by kind, size, price, store, or text |
+  | `add_furniture_item` | Add a catalog item (name, kind, size, price, URL, image). Catalog only, doesn't place it. |
+  | `list_proposals` / `get_proposal` | Proposals by status, room, or workspace, with their change rows and comments |
+  | `create_proposal` | New proposal: source, target workspace (or new), rooms, title, rationale, and a list of changes (op, entity, field, before, after). The server checks the "before" values and computes the cost impact. |
+  | `comment_on_proposal` | Add a comment to a proposal thread |
+  | `get_cost_estimate` | Cost-to-change steps, line items, and total for a workspace |
+  | `get_revision_history` | Revisions and their change rows for Current or a workspace |
+  | `add_inspiration` | Record an X bookmark or other reference: URL, text, media, matched rooms |
+  | `upload_reference_image` | Get a presigned upload URL for a reference photo and attach it to a room, inspiration, or proposal |
+  | `export_house` | The whole house as JSON (the `house.json` shape) |
+  | `approve_proposal`, `reject_proposal`, `apply_proposal`, `edit_current`, `rollback_revision` | `admin` only |
+
+- **Logging:** every MCP call that writes is recorded with the key id. Writes show up in history
+  and the Proposals panel as made by that agent.
+
+## 11. Phased roadmap
 
 Changes from the last version:
 
 - **New P0 for Railway setup**, since everything after it reads and writes the database.
+- **The MCP server ships in P1** alongside the API, so the daily bookmark routine can switch to it
+  right away.
 - **Proposals start in P1** (API, bot switch-over, basic approve/reject list) and get the visual
   split-view panel in P2, because the daily routine is already running.
 - **History and rollback** come with the revisions table in P1. The History list UI comes in P2.
 - **Cost-to-change estimates ship with shopping lists in P4.**
 
 ### P0: Railway setup
-- Railway project with MySQL and a bucket. One Hono (TypeScript) service that serves the static
-  editor and `/api/*`. Deploys automatically from the repo's `main` branch.
+- A new Railway project (workspace chosen at setup) with MySQL and a bucket, on the default
+  `*.up.railway.app` URL. One Hono (TypeScript) service that serves the static editor and `/api/*`.
+  Deploys automatically from the repo's `main` branch.
 - Prisma schema and migrations for the tables in section 6.
-- Passkey login with a one-time setup code and recovery codes. Session cookie. `BOT_API_KEY` for the bot.
+- Passkey login with a one-time setup code and recovery codes. Session cookie. The `agent_keys` table
+  and a way to create a key.
 - Seed script: import `tmbradley/house-data/house.json` into the relational tables, converting feet to
-  integer inches (the family room as Current, with existing furniture). Recorded as revision 1 (`kind = 'seed'`).
+  integer inches (the family room as Current, with existing furniture). Recorded as revision 1 (`kind = 'seed'`),
+  with `measurements` rows: confirmed room dimensions as `measured`, photo-based furniture sizes as `manual_estimate`.
 - Health check and a nightly JSON export (to the bucket, and optionally committed to `house-data`).
+- After the Railway version is live and checked: **turn off GitHub Pages** on `tmbradley/family-room-3d`
+  and point the README at the Railway URL.
 
-**Done when:** the editor loads from the Railway URL, you can sign in with Face ID on the iPhone and
-Touch ID on the Mac, `GET /api/house` returns the seeded family room, an unauthenticated request
-gets `401`, and a bot-key request can read but can't approve proposals.
+**Done when:** the editor loads from the Railway URL in desktop and phone browsers, you can sign in
+with Face ID on the iPhone and Touch ID on the Mac, `GET /api/house` returns the seeded family room
+with measurement sources, an unauthenticated request gets `401`, and GitHub Pages is off.
 
-### P1: House data model in the editor, Current + workspace tabs, proposals API
+### P1: House data in the editor, Current + workspace tabs, proposals, MCP server
 - The editor loads the house from the API instead of `catalog.js` defaults, and the family room
   looks identical to today, including the existing furniture.
 - Tab bar: Current (locked) first, then workspaces. Add, duplicate, rename, and delete tabs.
 - Saves go to the API with optimistic updates and revision-number conflict checks.
   `localStorage` keeps drafts. Every save is an append-only revision.
 - Each workspace marks every Current piece keep / replace / remove.
-- Proposals, basic version: `POST /api/proposals` for the bot. The editor lists proposals with
-  source link, target, change list, and rationale, with Approve/Reject. Import the existing
-  `house-data/proposals/` files and `designs.json` entries. Switch the daily routine over to the API.
+- Measurement entry: type rough dimensions by hand, mark a value as measured, and pin a manual
+  override. A "rough" badge shows on anything still a `manual_estimate`.
+- Proposals, basic version: the editor lists proposals with source link, target, change list, and
+  rationale, with Approve/Reject. Import the existing `house-data/proposals/` files and
+  `designs.json` entries.
+- **MCP server** at `/mcp` (Streamable HTTP) with scoped agent keys and the tools in section 10.
+  Connect this bot as a custom MCP connector with a `propose` key, and switch the daily routine to it.
 
 **Done when:** you create two workspaces, move furniture in one without affecting Current or the
 other, save on the laptop, and see it on the phone after reload. Editing the same workspace on both
 devices produces a conflict prompt, not lost work. The next bookmark from the daily routine arrives
-through the API as a proposal. Approving it changes (or creates) the target workspace, and
-rejecting it changes nothing.
+through MCP as a proposal. Approving it changes (or creates) the target workspace, and rejecting it
+changes nothing. A `propose` key gets an error on `approve_proposal`, and a `read` key gets an error
+on `create_proposal`.
 
 ### P2: Split view + camera sync + Proposals panel + History UI
 - Show any two tabs side by side (stacked on a phone).
@@ -476,8 +567,7 @@ and rolling back that entry restores the workspace exactly.
 measurements, and a measurement fix on Current shows up in every workspace.
 
 ### P4: Furniture catalog + shopping lists + cost to change
-- Furniture catalog in `furniture_items`, with an optional Notion sync depending on the open
-  question below.
+- Furniture catalog in `furniture_items` (MySQL only), managed in the editor and through MCP.
 - Per-workspace shopping list with links, prices, and totals. CSV export.
 - Cost-to-change estimate for every design: steps (paint, outlets/switch plates, lighting, window
   treatments, furniture, rug, decor), what changes in each step, a low/high range, and a total.
@@ -497,40 +587,34 @@ the measured widths (3 ft walkway + 2.5 ft), and a workspace can span both rooms
 
 ### P6: Scan import
 - Upload RoomPlan JSON, USDZ, or GLB from Polycam to the bucket through the API. Check against known
-  sizes. Align, then confirm into Current as a `rescan` revision.
+  sizes. Align, then confirm into Current as a `rescan` revision. Scan values go in as `source = scan`,
+  and manual overrides stay in effect.
 
 **Done when:** a Polycam scan of the family room imports within about 2" of the confirmed
-12 × 13 ft with the fireplace and window in the right places, and you can fix any errors with P3 tools.
+12 × 13 ft with the fireplace and window in the right places, you can fix any errors with P3 tools,
+and a pinned manual value survives the import.
 
-### P7: iOS App Clip scanner
-- TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip. The clip
-  uploads to the Railway API with a single-use upload token.
+### P7: iOS App Clip scanner (phone-first)
+- TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip for scanning
+  and photos. The clip uploads to the Railway API with a single-use upload token.
 
 **Done when:** from the iPhone, tapping "Scan room" opens the clip, completes a scan, and the room
 appears in the editor ready to confirm, with no manual file transfer.
 
 ---
 
-## 11. Open questions for Michael
+## 12. Open questions for Michael
 
-Answered and folded in: storage (Railway + MySQL, fully relational), room order (decide as we go), existing
-furniture in Current (yes, with keep / replace / remove), budget (none yet, so cost-to-change
-estimates instead), stores (bot researches them), and bot edits (proposals only).
+Answered and folded in: storage (Railway + MySQL, fully relational), furniture (MySQL only),
+Railway (a new project), URL (default `railway.app` for now), hosting (Railway only;
+Pages turned off once Railway is live), devices (web-first; App Clip phone-first for scans and
+photos), measurements (rough manual first, refined later, with provenance and manual overrides),
+room order (as we go), existing furniture (keep / replace / remove), budget (cost-to-change
+estimates instead), and agent access (MCP server, proposals only by default).
 
 Still open:
 
-1. The furniture sizes and positions in `house.json` are estimates from photos. Could you measure the
-   sectional (both arms), the swivel chair, the rug, and the two TVs? And which wall are the TVs on?
-2. Do you want to approve proposals from your phone as often as from the laptop? If so, the
-   Proposals panel gets designed phone-first.
-3. **Furniture: Notion or MySQL?** My recommendation is **MySQL as the source of truth**, edited in
-   the planner, with Notion as an optional one-way view if you like browsing there. That gives one
-   place for prices and shopping lists and avoids two-way sync conflicts. The personal Notion
-   connection also still points at the wrong workspace. Or would you rather keep editing furniture in
-   Notion, with the bot syncing it in?
-4. **Railway:** which Railway workspace or team should this go in (Hobby or Pro)? New project or an
-   existing one?
-5. **Domain:** use the default `*.up.railway.app` URL, or a custom domain/subdomain you own? A
-   custom domain also makes GitHub Pages + API workable if you want to keep Pages.
-6. **Editor hosting:** OK to serve the editor from Railway (recommended, for simpler login) and keep
-   GitHub Pages as a read-only demo?
+1. **Railway workspace:** which workspace the new project goes in. We'll decide at setup (P0).
+2. **Rough measurements to start:** the furniture sizes and positions in `house.json` are photo
+   estimates. Rough numbers are fine for now. When you have a minute, the sectional (both arms), the
+   swivel chair, the rug, the two TVs, and which wall the TVs are on would be the most useful.
