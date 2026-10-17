@@ -12,6 +12,10 @@ dimensions (1 unit = 1 ft):
 Built with plain HTML/CSS/JS and [three.js](https://threejs.org) loaded from a CDN via an import map,
 so there is no build step and it runs as-is on GitHub Pages.
 
+## Project plan
+
+Where this is headed (whole-house planner, design workspaces, split view, scanning): see [PLAN.md](PLAN.md).
+
 ## Run locally
 
 Any static file server works (ES modules don't load from `file://`):
