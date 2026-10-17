@@ -116,6 +116,12 @@ enum UploadStatus {
   rejected
 }
 
+enum ScanImportStatus {
+  pending
+  promoted
+  rejected
+}
+
 enum AgentScope {
   read
   propose
@@ -137,11 +143,12 @@ model House {
   currentRevision Int?     @map("current_revision") // NULL = no Current yet
   createdAt       DateTime @default(now()) @map("created_at")
 
-  rooms      Room[]
-  workspaces Workspace[]
-  proposals  Proposal[]
-  revisions  Revision[]
-  uploads    Upload[]
+  rooms       Room[]
+  workspaces  Workspace[]
+  proposals   Proposal[]
+  revisions   Revision[]
+  uploads     Upload[]
+  scanImports ScanImport[]
 
   @@map("houses")
 }
@@ -177,6 +184,7 @@ model Room {
   uploads        Upload[]
   inspiration    InspirationRoom[]
   uploadTokens   UploadToken[]
+  scanImports    ScanImport[]
 
   @@unique([houseId, draftWorkspaceId, slug])
   @@index([draftWorkspaceId])
@@ -603,21 +611,25 @@ model CostStepItem {
 // ---------- Files and inspiration ----------
 
 model Upload {
-  id         Int          @id @default(autoincrement())
-  houseId    Int          @map("house_id")
-  roomId     Int?         @map("room_id")
-  kind       UploadKind
-  format     UploadFormat
-  bucketKey  String       @unique @map("bucket_key") @db.VarChar(500)
-  bytes      Int?
-  status     UploadStatus @default(pending)
-  uploadedBy Actor        @map("uploaded_by")
-  createdAt  DateTime     @default(now()) @map("created_at")
+  id            Int          @id @default(autoincrement())
+  houseId       Int          @map("house_id")
+  roomId        Int?         @map("room_id")
+  kind          UploadKind
+  format        UploadFormat
+  bucketKey     String       @unique @map("bucket_key") @db.VarChar(500)
+  bytes         Int?
+  status        UploadStatus @default(pending)
+  uploadedBy    Actor        @map("uploaded_by")
+  scanImportId  Int?         @map("scan_import_id")
+  createdAt     DateTime     @default(now()) @map("created_at")
 
   house        House         @relation(fields: [houseId], references: [id], onDelete: Cascade)
   room         Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  scanImport   ScanImport?   @relation("scanFiles", fields: [scanImportId], references: [id], onDelete: SetNull)
   measurements Measurement[]
+  primaryFor   ScanImport[]  @relation("primaryUpload")
 
+  @@index([scanImportId])
   @@map("uploads")
 }
 
@@ -776,4 +788,43 @@ model UploadToken {
   room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
 
   @@map("upload_tokens")
+}
+
+// Scan imports: reviewable scans before they become Current
+model ScanImport {
+  id         Int              @id @default(autoincrement())
+  houseId    Int              @map("house_id")
+  roomId     Int?             @map("room_id")
+  uploadId   Int              @unique @map("upload_id")
+  status     ScanImportStatus @default(pending)
+  label      String?          @db.VarChar(120)
+  notes      String?          @db.Text
+  promotedAt DateTime?        @map("promoted_at")
+  promotedBy Actor?           @map("promoted_by")
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  house       House             @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  room        Room?             @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  upload      Upload            @relation("primaryUpload", fields: [uploadId], references: [id], onDelete: Cascade)
+  data        ScanImportData[]
+  files       Upload[]          @relation("scanFiles")
+
+  @@index([houseId])
+  @@index([status])
+  @@map("scan_imports")
+}
+
+// Parsed RoomPlan data before promotion (stored relationally)
+model ScanImportData {
+  id           Int    @id @default(autoincrement())
+  scanImportId Int    @map("scan_import_id")
+  entityType   String @map("entity_type") @db.VarChar(40)
+  entityIndex  Int    @map("entity_index")
+  field        String @db.VarChar(60)
+  value        String @db.VarChar(1000)
+
+  scanImport ScanImport @relation(fields: [scanImportId], references: [id], onDelete: Cascade)
+
+  @@index([scanImportId])
+  @@map("scan_import_data")
 }

@@ -659,16 +659,27 @@ the measured widths (3 ft walkway + 2.5 ft), and a workspace can span both rooms
 12 × 13 ft with the fireplace and window in the right places, you can fix any errors with P3 tools,
 and a pinned manual value survives the import.
 
-### P7: iOS App Clip scanner (phone-first)
-- TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip for scanning
-  and photos. The clip uploads to the Railway API with a single-use upload token.
+### P7: iOS App Clip scanner (phone-first) **[IN PROGRESS - Oct 17, 2026]**
+
+Building end-to-end room scanning: pairing, upload, import, review, and promote to Current.
+
+- **Pairing system:** web app generates a short-lived token/QR code; App Clip exchanges it for an upload token
+- **Upload endpoints:** presigned S3 URLs for RoomPlan JSON, USDZ, and photos; stored in Railway bucket
+- **Parser:** converts CapturedRoom data (walls, openings, objects with dimensions) to relational model
+- **Scan imports:** reviewable in the editor with 3D preview; never auto-promoted to Current
+- **iOS App Clip:** RoomPlan capture with LiDAR, photo collection, uploads with retry/persistence
+- **Parent app:** minimal container required for App Clip (simple room viewer or welcome screen)
 - **Build path (Decided): Xcode on Michael's Mac only.** He builds, signs (Apple Developer account), and
   uploads to TestFlight from Xcode. We don't use Linux or cloud iOS builds (including GitHub Actions
   macOS runners, which are too expensive). The bot writes the Swift code into the repo, and Michael
   builds it.
 
-**Done when:** from the iPhone, tapping "Scan room" opens the clip, completes a scan, and the room
-appears in the editor ready to confirm, with no manual file transfer.
+**Done when:** 
+- Michael generates a pairing code in the web app
+- Scans the room with the App Clip (RoomPlan + photos)
+- The scan uploads and appears as a reviewable import in the editor
+- He can preview it in 3D, fix with existing tools, then click "Promote to Current" to create the locked Current
+- Rescans propose updates without overwriting pinned manual values
 
 ---
 

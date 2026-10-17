@@ -1,0 +1,24 @@
+{
+  "appclips": {
+    "apps": [
+      "TEAMID.com.michaelbradley.houseplanner.clip"
+    ]
+  },
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "TEAMID.com.michaelbradley.houseplanner.clip"
+        ],
+        "components": [
+          {
+            "/": "/scan",
+            "?": {
+              "token": "?*"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

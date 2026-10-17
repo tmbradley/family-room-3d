@@ -13,6 +13,21 @@ import { approveProposal, createProposal, getProposal, listProposals, previewPro
 import { measurementHistory, recordMeasurement, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
+import { 
+  generateUploadToken, 
+  validateUploadToken, 
+  markTokenUsed, 
+  generatePresignedUpload, 
+  completeUpload 
+} from './uploads.js';
+import { 
+  createScanImport, 
+  getScanImport, 
+  listScanImports, 
+  promoteScanImport, 
+  rejectScanImport,
+  type CapturedRoom 
+} from './scans.js';
 
 type Env = { Variables: { auth: AuthInfo } };
 export const app = new Hono<Env>();
@@ -125,8 +140,134 @@ app.post('/api/measurements/unpin', read, michaelOnly, async (c) => {
 });
 app.get('/api/measurements', read, async (c) => c.json(await measurementHistory(prisma, c.req.query('entityType') ?? '', id(c.req.query('entityId') ?? ''))));
 
+// Upload tokens and pairing
+app.post('/api/upload-tokens', read, michaelOnly, async (c) => {
+  const body = z.object({ roomId: z.number().int().optional() }).parse(await c.req.json().catch(() => ({})));
+  const token = await generateUploadToken(body.roomId);
+  return c.json(token, 201);
+});
+
+// Validate token (used by App Clip)
+app.post('/api/upload-tokens/validate', async (c) => {
+  const body = z.object({ token: z.string() }).parse(await c.req.json());
+  const tokenRecord = await validateUploadToken(body.token);
+  return c.json({
+    valid: true,
+    roomId: tokenRecord.roomId,
+    expiresAt: tokenRecord.expiresAt,
+  });
+});
+
+// Generate presigned upload URL (used by App Clip)
+app.post('/api/uploads/presigned', async (c) => {
+  const body = z.object({
+    token: z.string(),
+    kind: z.enum(['scan', 'photo']),
+    format: z.enum(['usdz', 'glb', 'roomplan_json', 'jpg', 'heic', 'png']),
+    scanImportId: z.number().int().optional(),
+  }).parse(await c.req.json());
+
+  const tokenRecord = await validateUploadToken(body.token);
+  const house = await prisma.house.findFirst();
+  if (!house) throw new ApiError(404, 'no_house', 'No house found');
+
+  const presigned = await generatePresignedUpload({
+    houseId: house.id,
+    roomId: tokenRecord.roomId ?? undefined,
+    kind: body.kind,
+    format: body.format,
+    scanImportId: body.scanImportId,
+  });
+
+  return c.json(presigned);
+});
+
+// Complete upload (used by App Clip)
+app.post('/api/uploads/:id/complete', async (c) => {
+  const body = z.object({
+    token: z.string(),
+    bytes: z.number().int(),
+  }).parse(await c.req.json());
+
+  await validateUploadToken(body.token);
+  await completeUpload(id(c.req.param('id')), body.bytes);
+  return c.json({ success: true });
+});
+
+// Mark token as used after all uploads complete
+app.post('/api/upload-tokens/:id/complete', async (c) => {
+  const body = z.object({ token: z.string() }).parse(await c.req.json());
+  const tokenRecord = await validateUploadToken(body.token);
+  await markTokenUsed(tokenRecord.id);
+  return c.json({ success: true });
+});
+
+// Import scan from RoomPlan data
+app.post('/api/scans/import', async (c) => {
+  const body = z.object({
+    token: z.string(),
+    uploadId: z.number().int(),
+    roomplanData: z.any(), // CapturedRoom JSON
+    label: z.string().max(120).optional(),
+    roomId: z.number().int().optional(),
+  }).parse(await c.req.json());
+
+  const tokenRecord = await validateUploadToken(body.token);
+  const house = await prisma.house.findFirst();
+  if (!house) throw new ApiError(404, 'no_house', 'No house found');
+
+  const scanImport = await createScanImport({
+    houseId: house.id,
+    uploadId: body.uploadId,
+    roomplanData: body.roomplanData as CapturedRoom,
+    label: body.label,
+    roomId: body.roomId ?? tokenRecord.roomId ?? undefined,
+  });
+
+  return c.json(scanImport, 201);
+});
+
+// Scan imports management
+app.get('/api/scans', read, async (c) => {
+  const house = await prisma.house.findFirst();
+  if (!house) return c.json([]);
+  
+  const status = c.req.query('status') as any;
+  const scans = await listScanImports(
+    house.id,
+    ['pending', 'promoted', 'rejected'].includes(status) ? status : undefined
+  );
+  return c.json(scans);
+});
+
+app.get('/api/scans/:id', read, async (c) => {
+  const scan = await getScanImport(id(c.req.param('id')));
+  return c.json(scan);
+});
+
+app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => {
+  const result = await promoteScanImport(id(c.req.param('id')), 'michael');
+  return c.json(result);
+});
+
+app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
+  const body = z.object({ notes: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));
+  const result = await rejectScanImport(id(c.req.param('id')), body.notes);
+  return c.json(result);
+});
+
 // MCP
 app.all('/mcp', (c) => handleMcp(c.req.raw));
+
+// Apple App Site Association for App Clip
+app.get('/.well-known/apple-app-site-association', (c) => {
+  c.header('Content-Type', 'application/json');
+  return c.body(require('fs').readFileSync('./server/public/apple-app-site-association', 'utf-8'));
+});
+app.get('/apple-app-site-association', (c) => {
+  c.header('Content-Type', 'application/json');
+  return c.body(require('fs').readFileSync('./server/public/apple-app-site-association', 'utf-8'));
+});
 
 // Pages
 app.get('/login', serveStatic({ path: './server/public/login.html' }));
