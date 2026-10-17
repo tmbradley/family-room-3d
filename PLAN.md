@@ -1,6 +1,6 @@
 # House Design Planner: Project Plan
 
-Status: draft, with Michael's answers folded in · Last updated: Oct 17, 2026
+Status: draft, with Michael's decisions folded in · Last updated: Oct 17, 2026
 
 This plan describes how the current single-room editor grows into a planner for the whole house.
 Each phase lists what gets built and how we'll know it's done. Decisions made so far are marked
@@ -94,16 +94,13 @@ Edits snap to 1" by default (toggle off for free placement). Every edit can be u
 
 ## 5. Furniture and shopping lists
 
-- **Catalog source:** a Notion database in Michael's private ("personal") Notion. Each row is one
-  piece: name, kind (sofa, chair, table, rug, lamp, ...), width, depth, and height in inches,
+- **Catalog:** furniture lives in the `furniture_items` table in Postgres (section 6). Each item is
+  one piece: name, kind (sofa, chair, table, rug, lamp, ...), width, depth, and height in inches,
   color, store, product URL, price, image, and a status like idea / shortlisted / bought.
-- **Connection status:** the "personal" Notion connection currently signs into the Classroom
-  Mosaic workspace instead of the private one. It needs a fresh sign-in, choosing the private
-  workspace before approving. Until then, `catalog.js` stays the source.
-- **How the catalog reaches the app:** the browser can't call Notion directly (no browser
-  access/CORS, and the token must stay secret). So the bot syncs the Notion database into a
-  `catalog.json` file in the data store (see section 6), and the app reads that. `catalog.js`
-  becomes the fallback.
+- **Notion (optional):** Michael's private ("personal") Notion can be a friendly view or editor for
+  the catalog and shopping lists, synced by the bot. Whether Notion stays in the loop is an open
+  question (section 11). The "personal" connection currently signs into the Classroom Mosaic workspace
+  and needs a fresh sign-in either way. Until P4, `catalog.js` stays the source.
 - **Shopping list per workspace:** every piece placed in a workspace that isn't already in Current,
   with link, price, quantity, and a total. Pieces marked "keep" from Current show as $0.
   Exportable as CSV.
@@ -139,108 +136,136 @@ low/high cost range, followed by a total.
 
 The bot will research a few budget-friendly sources of mid-century lookalikes besides West Elm,
 checking price range, quality reviews, shipping, and returns. It will add only verified sources to
-the Notion database as a "store" option. The list isn't filled in here until that research is done.
+the catalog as a "store" option. The list isn't filled in here until that research is done.
 
 ---
 
-## 6. Data storage
+## 6. Architecture and data storage (Decided: Railway + Postgres)
 
-### House file format (JSON)
+House data moves to **Railway** with a real **Postgres** database. Michael already uses Railway for
+other projects. This replaces the earlier plan of a private GitHub repo with a token pasted on each device.
 
-One file per house. Units are feet for positions and inches for furniture sizes, as the app uses today.
-
-```jsonc
-{
-  "version": 1,
-  "house": { "name": "Bradley house", "units": "ft" },
-  "current": {
-    "updatedAt": "2026-10-17T21:00:00Z",
-    "rooms": [
-      {
-        "id": "family",
-        "label": "Family room",
-        "origin": { "x": 0, "z": 0 }, "rotation": 0,
-        "ceiling": 9,
-        "floor": { "material": "oak", "color": "#c8913f" },
-        "wallColor": "#cfc6b8",
-        "walls": [
-          { "id": "w-left", "a": [0, 0], "b": [0, 13], "height": 9 },
-          { "id": "w-back", "a": [0, 13], "b": [12, 13], "height": 9 }
-        ],
-        "openings": [
-          { "id": "fireplace", "wall": "w-left", "type": "fireplace", "offset": 4, "width": 5 },
-          { "id": "win-1", "wall": "w-back", "type": "window", "offset": 4, "width": 5, "sill": 2.5, "head": 7.5 }
-        ],
-        "openEdges": [ { "a": [12, 0], "b": [12, 13], "to": "walkway" } ],
-        "furniture": [ /* existing pieces, same shape as placements below */ ]
-      }
-    ]
-  },
-  "workspaces": [
-    {
-      "id": "classic-mcm",
-      "name": "Classic MCM",
-      "rooms": ["family"],
-      "createdFrom": "current",
-      "source": { "kind": "manual" },          // or { "kind": "x-bookmark", "url": "..." }
-      "notes": "",
-      "colors": { "family": { "wallColor": "#8a8f7a" } },
-      "structureOverrides": [],
-      "currentFurniture": {                    // decision for each Current piece
-        "sectional": { "action": "replace", "with": "sofa-mcm-84" },
-        "swivel":    { "action": "keep" },
-        "rug":       { "action": "remove" }
-      },
-      "placements": [
-        { "room": "family", "catalogId": "sofa-mcm-84", "x": 10.0, "z": 6.5, "rot": 270 }
-      ],
-      "costEstimate": {
-        "steps": [
-          { "step": "paint", "changes": "Walls greige -> olive", "low": 150, "high": 400 },
-          { "step": "furniture", "changes": "New 84in sofa; keep swivel chair", "low": 1200, "high": 2200,
-            "items": [ { "catalogId": "sofa-mcm-84", "low": 1200, "high": 2200 },
-                       { "currentId": "swivel", "action": "keep", "low": 0, "high": 0 } ] }
-        ],
-        "total": { "low": 1350, "high": 2600 },
-        "updatedAt": "2026-10-17T21:00:00Z"
-      },
-      "history": []                           // ids of applied proposals / saves, newest last
-    }
-  ]
-}
-```
-
-### Where it lives (Decided)
-
-**A private repo, [`tmbradley/house-data`](https://github.com/tmbradley/house-data).** The public app
-repo holds only code.
+### Pieces
 
 ```
-house-data/
-  house.json        Current + all workspaces
-  proposals/        one JSON file per change request (section 7)
-  history/          one JSON file per applied change, used for rollback
-  catalog.json      furniture synced from Notion (P4)
+ iPhone / laptop browser            Bot (daily routine, edits)        iOS App Clip (later)
+        │  session cookie                 │  bot API key                    │  upload token
+        ▼                                 ▼                                 ▼
+ ┌──────────────────────────── Railway project "house-planner" ─────────────────────────────┐
+ │  web+api service (Node + TypeScript, Hono)  ──►  Postgres  (house, workspaces, proposals) │
+ │        serves the static editor + /api/*    ──►  Bucket    (scans, photos)                │
+ └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- The app reads and writes these files through the **GitHub contents API**. Each device needs a
-  **fine-grained GitHub token**, pasted once, with access to `house-data` only (contents
-  read/write). The token stays in that browser.
-- Edits autosave to `localStorage` as drafts. **Save** commits to `house-data`. **Load** pulls the
-  latest version.
-- If the file changed on GitHub since the last load (from the other device or from the bot), the
-  app asks before overwriting instead of losing either version.
-- The bot reads and writes the same repo with `gh`. Git history doubles as a backup.
-- Notion stays the place for furniture and inspiration a person browses. It isn't the source of
-  truth for geometry.
-- **Seeded:** `house.json` already has the family room as Current: walls, fireplace, window, open
-  edge, greige walls, white trim, honey oak floors, black ceiling fan, white blinds, and the
-  existing furniture (charcoal L-sectional, matching round swivel chair, gray geometric rug, dual
-  stacked TVs). Sizes and positions estimated from photos are flagged `"approx": true`.
+- **Editor:** stays a static three.js app with no build step. Two ways to host it:
 
-Other options we considered: `localStorage` only (one device, and the bot can't see it), JSON in
-the public repo (exposes the house layout), and Notion as the store (the browser can't call Notion
-without a server, and it's a poor fit for geometry).
+  | Option | Pros | Cons |
+  |---|---|---|
+  | **Served by the Railway service** (recommended) | Same origin as the API, so login is a plain first-party cookie with no cross-site cookie problems in iPhone Safari. One deploy, one URL. | The editor is no longer on GitHub Pages (Pages can keep a read-only demo). |
+  | GitHub Pages + API on Railway | Free static hosting, already live. | Different site from the API. Safari blocks cross-site cookies, so it needs either a custom domain with both on subdomains of one domain, or bearer tokens kept in the browser (less safe). |
+
+  Recommendation: serve it from Railway, from the same repo's static files. Keep the Pages site as
+  a public read-only demo with the default layout.
+
+- **API server: Node + TypeScript with [Hono](https://hono.dev).** It's small, TypeScript-first, built on
+  web standards (Request/Response), and runs well on Node on Railway. It has built-in middleware for
+  cookies, CORS, and bearer auth, and a small dependency footprint suits an API with about a dozen
+  routes. Fastify is a fine alternative with a bigger plugin ecosystem, but we don't need it here. Database access
+  goes through **Drizzle** (typed SQL with plain migration files) on the `pg` driver.
+
+- **Login (single user): passkeys.** Michael signs in with Face ID / Touch ID. Passkeys sync through
+  iCloud Keychain, so iPhone and Mac both work with no passwords and no email service. The server
+  issues an httpOnly, Secure, SameSite=Lax session cookie (30-day sliding expiry). Setup: a one-time
+  `SETUP_CODE` env var lets the first passkey be registered, then it's turned off. Printed recovery
+  codes cover a lost device. Magic links were considered, but they need an email provider and add a
+  mail round trip on the phone.
+
+- **Bot access:** a separate API key (`BOT_API_KEY`), stored as a Railway env var on the server and
+  as a bot secret on the bot side. The key is limited to reading everything and **creating
+  proposals, inspiration rows, and catalog syncs**. It can't approve proposals or change Current. Every
+  bot write is tagged `actor = 'bot'`.
+
+- **File storage: Railway's S3-compatible bucket (object storage)**, not a volume. A bucket isn't
+  tied to one service, lets the App Clip and browser upload directly with presigned URLs, and egress
+  is free. A volume would pin storage to one service and make redeploys and backups clumsier.
+
+### Database schema (sketch)
+
+Plain columns for things we filter, join, or total on. **JSONB** for nested geometry and diffs
+that are always read and written as a whole (wall polylines, opening details, proposal change
+lists). That keeps the schema small while the geometry format is still changing, and Postgres can
+still index into JSONB if needed.
+
+| Table | Key columns | Notes |
+|---|---|---|
+| `houses` | id, name, units, current_revision | One row for now. |
+| `rooms` | id, house_id, slug, label, origin_x, origin_z, rotation, ceiling_ft, floor (jsonb), wall_color, trim_color | Part of Current. |
+| `walls` | id, room_id, a (jsonb `[x,z]`), b (jsonb), height_ft | Rows, so one wall can be edited or referenced alone. |
+| `openings` | id, room_id, wall_id (null for open edges), type (window/door/open/fireplace), offset_ft, width_ft, sill_ft, head_ft, details (jsonb) | `details` holds the treatment (e.g. blinds) and notes. |
+| `fixtures` | id, room_id, type, name, color, position (jsonb), details (jsonb) | Fan, outlets, blinds. |
+| `workspaces` | id, house_id, name, rooms (text[]), base = 'current', base_revision, structure_overrides (jsonb), colors (jsonb), notes, source (jsonb), revision | Base is always Current. `base_revision` shows which Current it was last reconciled with. |
+| `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store, url, price, image_url, status, notion_page_id, is_existing | The catalog. Current's furniture is items with `is_existing = true`. |
+| `placements` | id, workspace_id (null = Current), room_id, item_id, x, z, rot, action (keep/replace/remove/new), replaces_item_id | Keep/replace/remove decisions live here. |
+| `proposals` | id, house_id, created_at, actor, source (jsonb: kind, url, image), target_workspace_id (null = new), target_rooms, title, rationale, diff (jsonb), cost_low, cost_high, status (proposed/approved/rejected/applied), decided_at, decision_note, base_revision | `diff` is a list of `{op, path, before, after}`. |
+| `revisions` | id, house_id, scope ('current' or workspace id), number, actor, kind (save/proposal/rescan/rollback), proposal_id, patch (jsonb), inverse (jsonb), snapshot (jsonb, every Nth), created_at | **Append-only.** Never updated or deleted. |
+| `cost_estimates` | id, workspace_id, total_low, total_high, computed_at | Recomputed on change. |
+| `cost_steps` | id, estimate_id, step (paint/outlets/lighting/window/furniture/rug/decor/other), changes, low, high, items (jsonb) | One row per step. |
+| `uploads` | id, house_id, room_id, kind (scan/photo), format (usdz/glb/roomplan-json/jpg), bucket_key, bytes, status (uploaded/imported/rejected), created_at | Scans and photos in the bucket. |
+| `inspiration` | id, x_post_id, url, author, text, media (jsonb), rooms, classified_at, proposal_id | One row per X bookmark the routine handled. |
+| `sessions`, `passkeys` | the usual | Auth. |
+
+### Version history and rollback (append-only revisions)
+
+- Every change to Current or a workspace runs in one transaction. It applies the change, bumps that
+  scope's `revision` number, and inserts a `revisions` row with the forward `patch` and its `inverse`.
+  Every 20th revision also stores a full `snapshot`.
+- **History list:** read `revisions` for a workspace, newest first, with who (Michael / bot via
+  approved proposal) and why.
+- **Undo one change:** apply its `inverse` as a new revision (`kind = 'rollback'`). It's refused, and
+  shown as a conflict, if a later revision touched the same paths.
+- **Restore to a point:** load the nearest snapshot, replay patches up to that revision, and write the
+  result as one new revision. Nothing is ever deleted, so a rollback can itself be rolled back.
+
+### Phone / laptop sync
+
+- **The server is the source of truth.** The browser keeps a draft copy in `localStorage` only so
+  nothing is lost if a save fails or you're offline.
+- **Optimistic saves:** the editor updates instantly, then sends the change with the
+  `revision` it was based on (`If-Match`-style).
+- **Conflict check:** if the server's revision is newer (the other device or an applied proposal
+  changed it), the save returns `409` with the latest state. The editor reloads it and re-applies your
+  unsaved edits where they don't overlap, or asks which version to keep.
+- **Live updates (later, optional):** a server-sent events stream per house so an open tab refreshes
+  when something changes elsewhere. Not needed for P1.
+
+### The `tmbradley/house-data` repo
+
+- Its `house.json` is the **seed for the first database migration** (P0). The same JSON shape stays
+  as the **export/import format** for the whole house (Current, workspaces, placements).
+- After that it becomes an **optional backup/export** target. A nightly job (or a button) exports the
+  whole house to JSON and commits it there. If we decide backups aren't needed, the repo gets archived.
+- **Until the API exists**, the bot's X bookmark routine writes proposals as JSON files to
+  `house-data/proposals/`. Once the API is up (P1), it switches to `POST /api/proposals`, and those
+  files are imported into the `proposals` table.
+
+### Rough Railway cost (estimate)
+
+Based on Railway's [pricing page](https://railway.com/pricing) as of Oct 17, 2026. Usage is billed per
+second: about $10 per GB of RAM per month, $20 per vCPU per month, $0.15 per GB of volume, and
+$0.015 per GB-month of object storage. Hobby is $5/mo with $5 of usage included. Pro is $20/mo per
+workspace with $20 included.
+
+| Item | Rough monthly use | Est. cost |
+|---|---|---|
+| Web+API service (idle most of the day, ~100–150 MB RAM) | | $1 – $2 |
+| Postgres (~200–300 MB RAM, ~1 GB disk) | | $2 – $3.50 |
+| Bucket (a few GB of scans and photos) | | < $0.10 |
+| **Usage total** | | **≈ $3 – $6 / month** |
+
+On Hobby that's mostly covered by the $5 included, so about **$5–7/month all-in**. If it goes in
+Michael's existing Railway workspace, it shares that plan's included credit with his other projects, so
+the extra cost is just the usage, about $3–6. *These are estimates. Actual cost depends on RAM use,
+which we'll check after P0.*
 
 ---
 
@@ -248,14 +273,14 @@ without a server, and it's a poor fit for geometry).
 
 **Rule:** inspiration from the X bookmark routine, and any other bot suggestion, **never edits a
 design directly**. It creates a **proposal** (a change request). Only Michael applies changes,
-by approving them.
+by approving them. The bot's API key can create proposals but can't approve them.
 
-**What a proposal contains** (one file in `house-data/proposals/`):
+**What a proposal contains** (a row in `proposals`; before the API exists, a file in `house-data/proposals/`):
 
 - **Source:** link to the X post or other origin, plus an image if there is one
 - **Target:** room(s) and workspace, or "new workspace" with a suggested name
-- **Changes:** a list of specific edits with **before / after** values (move this piece, replace
-  that one, change wall color, add an item). It's precise enough to apply automatically.
+- **Changes (diff):** a list of specific edits with **before / after** values (move this piece,
+  replace that one, change wall color, add an item). It's precise enough to apply automatically.
 - **Rationale:** why it fits the room and the design style
 - **Cost impact:** the change to that design's cost-to-change total (low/high)
 - **Status:** `proposed` → `approved` or `rejected` → `applied`, with dates and an optional
@@ -267,20 +292,15 @@ by approving them.
 - Opening one shows a **visual before/after in split view**: the workspace as it is on the left
   and the workspace with the proposal applied on the right, with camera sync on. The change list,
   rationale, and cost impact are shown underneath.
-- **Approve** applies the changes to the workspace. For "new workspace," it creates the workspace
-  from Current plus the changes. **Reject** keeps the file with status `rejected` and an optional
-  reason, so the bot learns what you don't want.
-- If the workspace changed since the proposal was written and a "before" value no longer
-  matches, the editor flags it and won't apply it blindly. You can still apply the parts that match,
-  or reject it.
+- **Approve** applies the diff to the workspace as a new revision. For "new workspace," it creates the
+  workspace from Current plus the changes. **Reject** keeps the proposal with status `rejected` and an
+  optional reason, so the bot learns what you don't want.
+- If the workspace changed since the proposal was written (its `base_revision` is behind) and a
+  "before" value no longer matches, the editor flags it and won't apply it blindly. You can still
+  apply the parts that match, or reject it.
 
-**History and rollback**
-
-- Every applied proposal (and every manual save of a workspace) writes an entry to
-  `house-data/history/` with what changed and the before values.
-- Each workspace has a History list. **Roll back** reverses one entry (if later changes don't
-  conflict) or restores the workspace to how it was at that point.
-- Current has its own history for rescans and measurement fixes.
+**History and rollback:** every applied proposal and every save is an append-only revision
+(section 6). Each workspace and Current has a History list with undo and restore.
 
 ## 8. Scanning (later phase, not now)
 
@@ -291,26 +311,29 @@ on LiDAR iPhones, then export and upload in the editor:
 
 - Preferred: **RoomPlan JSON** if available, since it has walls, openings, and sizes as clean data.
 - Also: **USDZ / GLB**, which the importer reads for wall and opening objects.
-- The importer converts the scan into the house format, checks it against known measurements (for
-  example the family room's 12 × 13 ft), and lets you place it with the room-align tool. Nothing
-  overwrites Current until you confirm.
+- The file goes to the bucket (an `uploads` row). The importer converts the scan into rooms, walls,
+  and openings, checks it against known measurements (for example the family room's 12 × 13 ft), and
+  lets you place it with the room-align tool. Nothing changes Current until you confirm, which is
+  then a `rescan` revision.
 
 **Step 2: iOS App Clip for scanning.**
 
 - What's available: an Apple Developer account, a LiDAR iPhone Pro, and a Mac with Xcode set up.
 - Flow: tap "Scan room" in the web app (or scan a QR code) → the App Clip opens → RoomPlan scan →
-  the result uploads to the data store → the editor imports it.
+  the clip asks the **Railway API** for a presigned upload URL, uploads the RoomPlan JSON / USDZ to
+  the bucket, and registers it → the editor shows it as ready to import.
+- Auth for the clip: the "Scan room" link carries a short-lived, single-use upload token created by
+  the logged-in editor. No login inside the clip.
 - Requirements: an App Clip must ship inside a full parent app that passes App Store review. The
   parent can be minimal, like a simple room viewer. The clip has a size limit, and a
   scan-and-upload screen fits within it.
 - **First task in this phase:** confirm RoomPlan works inside an App Clip with a minimal TestFlight
   build before building anything else. If it doesn't, fall back to a small full app distributed
   through TestFlight.
-- Upload target: the same private data repo through the GitHub API, so no new server is needed.
 
 **Per room, always capture both:** one LiDAR scan for geometry, plus 4–6 daylight photos (corners,
 plus any feature wall) for true colors and details like floor tone, trim, outlets, and the
-fireplace finish.
+fireplace finish. Photos are stored as `uploads` too.
 
 ---
 
@@ -326,56 +349,65 @@ fireplace finish.
 4. Post a short note listing each bookmark and the proposal it produced. Nothing on days with no
    design bookmarks.
 
-**Until the editor supports workspaces**, designs are tracked by the bot in
-`/cursor/stores/store-87e031d1-b2f2-435c-b46f-6636a178fa2c/home-design/designs.json` (bot-side
-storage, not in this repo). Each entry has the room(s), workspace name, a description of the
-change, colors, furniture ideas, and the source bookmark URL.
+**Where its output goes, by stage:**
 
-**How the editor will consume it:**
-
-- As of P1, the bot writes **proposals** to `house-data/proposals/` instead of `designs.json` and
-  commits them. They show up in the Proposals panel (P2), and Michael approves or rejects them there.
-- Existing entries in `designs.json` are converted once into proposals (mostly "new workspace"), not
-  applied directly. Any that need furniture get placeholder catalog pieces, labeled as placeholders.
-- Inspiration notes and images can also go to a Notion board for browsing, once the personal
-  Notion connection is fixed.
+- **Now:** designs are noted in the bot's store
+  (`/cursor/stores/store-87e031d1-b2f2-435c-b46f-6636a178fa2c/home-design/designs.json`), and
+  proposals are written as JSON files to `tmbradley/house-data/proposals/`.
+- **Once the API exists (P1):** the routine calls `POST /api/inspiration` and `POST /api/proposals`
+  with the bot API key. The existing files and `designs.json` entries are imported once as proposals
+  (mostly "new workspace"), not applied directly. Any that need furniture get placeholder catalog
+  pieces, labeled as placeholders.
 - Workspaces created or changed by an approved proposal link back to it in their History.
 
 ---
 
 ## 10. Phased roadmap
 
-The suggested order is mostly kept, with these changes:
+Changes from the last version:
 
-- **Data sync moves into P1**, because phone/laptop use and the bot both depend on it.
-- **Proposals start in P1 and P2**, because the daily routine is already running. In P1 the bot
-  writes proposals to `house-data` and the editor lists them with Approve/Reject. In P2 the panel
-  gets the visual before/after in split view, plus history and rollback.
+- **New P0 for Railway setup**, since everything after it reads and writes the database.
+- **Proposals start in P1** (API, bot switch-over, basic approve/reject list) and get the visual
+  split-view panel in P2, because the daily routine is already running.
+- **History and rollback** come with the revisions table in P1. The History list UI comes in P2.
 - **Cost-to-change estimates ship with shopping lists in P4.**
 
-### P1: House data model, Current + workspace tabs, family room migration
-- Define `house.json` (section 6). Move the family room into it: walls, fireplace, window, open edge, and the existing furniture as Current.
+### P0: Railway setup
+- Railway project with Postgres and a bucket. One Hono (TypeScript) service that serves the static
+  editor and `/api/*`. Deploys automatically from the repo's `main` branch.
+- Drizzle schema and migrations for the tables in section 6.
+- Passkey login with a one-time setup code and recovery codes. Session cookie. `BOT_API_KEY` for the bot.
+- Seed migration: import `tmbradley/house-data/house.json` (the family room as Current, with existing furniture).
+- Health check and a nightly JSON export (to the bucket, and optionally committed to `house-data`).
+
+**Done when:** the editor loads from the Railway URL, you can sign in with Face ID on the iPhone and
+Touch ID on the Mac, `GET /api/house` returns the seeded family room, an unauthenticated request
+gets `401`, and a bot-key request can read but can't approve proposals.
+
+### P1: House data model in the editor, Current + workspace tabs, proposals API
+- The editor loads the house from the API instead of `catalog.js` defaults, and the family room
+  looks identical to today, including the existing furniture.
 - Tab bar: Current (locked) first, then workspaces. Add, duplicate, rename, and delete tabs.
-- Save and load against `tmbradley/house-data` with a per-device token, `localStorage` drafts, and
-  a conflict prompt.
-- Current includes existing furniture. Each workspace marks every Current piece keep / replace / remove.
-- Proposals, basic version: the bot writes proposals to `house-data/proposals/`. The editor lists
-  them with source link, target, change list, and rationale, with Approve/Reject buttons that apply
-  the change or mark it rejected. The bot's `designs.json` entries are converted into proposals.
+- Saves go to the API with optimistic updates and revision-number conflict checks.
+  `localStorage` keeps drafts. Every save is an append-only revision.
+- Each workspace marks every Current piece keep / replace / remove.
+- Proposals, basic version: `POST /api/proposals` for the bot. The editor lists proposals with
+  source link, target, change list, and rationale, with Approve/Reject. Import the existing
+  `house-data/proposals/` files and `designs.json` entries. Switch the daily routine over to the API.
 
-**Done when:** the live site loads the family room from `house.json` and it looks identical to
-today, including the existing furniture. You can create two workspaces, move furniture in one
-without affecting Current or the other, save on the laptop, and see it on the phone after reload.
-A bookmark from the daily routine shows up as a proposal. Approving it changes (or creates) the
-target workspace. Rejecting it changes nothing.
+**Done when:** you create two workspaces, move furniture in one without affecting Current or the
+other, save on the laptop, and see it on the phone after reload. Editing the same workspace on both
+devices produces a conflict prompt, not lost work. The next bookmark from the daily routine arrives
+through the API as a proposal. Approving it changes (or creates) the target workspace, and
+rejecting it changes nothing.
 
-### P2: Split view + camera sync + Proposals panel
+### P2: Split view + camera sync + Proposals panel + History UI
 - Show any two tabs side by side (stacked on a phone).
 - Sync toggle: shared orbit angle, zoom, pan, and top/3D mode.
 - Optional: follow selected room.
 - Proposals panel opens each proposal as a before/after split view with sync on. Rejected proposals
   keep the reason, and a proposal whose "before" values no longer match gets flagged.
-- History for every workspace (and for Current), with rollback.
+- History list for every workspace (and for Current), with undo-one-change and restore-to-point.
 
 **Done when:** with sync on, rotating, zooming, panning, or switching top/3D in either pane makes the
 other match exactly. With sync off, the panes move independently. It works on iPhone Safari and desktop.
@@ -390,17 +422,17 @@ and rolling back that entry restores the workspace exactly.
 **Done when:** you can draw a new rectangular room with a door and a window to within 1" of tape
 measurements, and a measurement fix on Current shows up in every workspace.
 
-### P4: Notion furniture catalog + shopping lists + cost to change
-- Fix the personal Notion connection. Create the furniture database. The bot syncs it to `catalog.json`.
+### P4: Furniture catalog + shopping lists + cost to change
+- Furniture catalog in `furniture_items`, with an optional Notion sync depending on the open
+  question below.
 - Per-workspace shopping list with links, prices, and totals. CSV export.
 - Cost-to-change estimate for every design: steps (paint, outlets/switch plates, lighting, window
   treatments, furniture, rug, decor), what changes in each step, a low/high range, and a total.
   Kept pieces cost $0. Proposals show their cost impact.
-- Research a few budget-friendly mid-century lookalike stores besides West Elm, and add the
-  verified ones to Notion.
+- Research a few budget-friendly mid-century lookalike stores besides West Elm, and add the verified ones.
 
-**Done when:** adding a row in Notion shows up in the editor's catalog after a sync. Placing it in
-a workspace adds it to that workspace's shopping list and updates its cost-to-change breakdown and
+**Done when:** adding an item to the catalog makes it placeable in the editor. Placing it in a
+workspace adds it to that workspace's shopping list and updates its cost-to-change breakdown and
 total. Marking a Current piece "keep" shows it at $0.
 
 ### P5: Multi-room house + stitching
@@ -411,13 +443,15 @@ total. Marking a Current piece "keep" shows it at $0.
 the measured widths (3 ft walkway + 2.5 ft), and a workspace can span both rooms.
 
 ### P6: Scan import
-- Import RoomPlan JSON, USDZ, and GLB from Polycam. Check against known sizes. Align, then confirm into Current.
+- Upload RoomPlan JSON, USDZ, or GLB from Polycam to the bucket through the API. Check against known
+  sizes. Align, then confirm into Current as a `rescan` revision.
 
 **Done when:** a Polycam scan of the family room imports within about 2" of the confirmed
 12 × 13 ft with the fireplace and window in the right places, and you can fix any errors with P3 tools.
 
 ### P7: iOS App Clip scanner
-- TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip, with upload to the data repo.
+- TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip. The clip
+  uploads to the Railway API with a single-use upload token.
 
 **Done when:** from the iPhone, tapping "Scan room" opens the clip, completes a scan, and the room
 appears in the editor ready to confirm, with no manual file transfer.
@@ -426,9 +460,9 @@ appears in the editor ready to confirm, with no manual file transfer.
 
 ## 11. Open questions for Michael
 
-Answered and folded in: storage (private `house-data` repo), room order (decide as we go),
-existing furniture in Current (yes, with keep / replace / remove), budget (none yet, so
-cost-to-change estimates instead), stores (bot researches them), and bot edits (proposals only).
+Answered and folded in: storage (Railway + Postgres), room order (decide as we go), existing
+furniture in Current (yes, with keep / replace / remove), budget (none yet, so cost-to-change
+estimates instead), stores (bot researches them), and bot edits (proposals only).
 
 Still open:
 
@@ -436,3 +470,14 @@ Still open:
    sectional (both arms), the swivel chair, the rug, and the two TVs? And which wall are the TVs on?
 2. Do you want to approve proposals from your phone as often as from the laptop? If so, the
    Proposals panel gets designed phone-first.
+3. **Furniture: Notion or Postgres?** My recommendation is **Postgres as the source of truth**, edited in
+   the planner, with Notion as an optional one-way view if you like browsing there. That gives one
+   place for prices and shopping lists and avoids two-way sync conflicts. The personal Notion
+   connection also still points at the wrong workspace. Or would you rather keep editing furniture in
+   Notion, with the bot syncing it in?
+4. **Railway:** which Railway workspace or team should this go in (Hobby or Pro)? New project or an
+   existing one?
+5. **Domain:** use the default `*.up.railway.app` URL, or a custom domain/subdomain you own? A
+   custom domain also makes GitHub Pages + API workable if you want to keep Pages.
+6. **Editor hosting:** OK to serve the editor from Railway (recommended, for simpler login) and keep
+   GitHub Pages as a read-only demo?
