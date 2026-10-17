@@ -260,12 +260,13 @@ Engine: InnoDB (foreign keys, transactions), `utf8mb4`.
 | `workspaces` | id, house_id → houses, name, notes, base_revision, revision, created_by (michael/bot), source_proposal_id → proposals (nullable) | Normally based on Current. `base_revision` = the Current revision it was last reconciled with; NULL = not based on Current (draft/test workspaces made before Current exists). |
 | `workspace_rooms` | workspace_id → workspaces, room_id → rooms | Which rooms a workspace covers (many-to-many). |
 | `workspace_room_styles` | workspace_id, room_id, wall_color, trim_color, floor_color | Per-design color overrides. Missing = same as Current. |
-| `measurements` | id, entity_type, entity_id, field, value_in, source (manual_estimate/measured/scan), is_override, upload_id → uploads (nullable), recorded_by, recorded_at, note | Provenance for every dimension and position. Never deleted. |
+| `measurements` | id, entity_type, entity_id, field, value_in, source (manual_estimate/measured/scan/manual = pinned), is_override, unpinned_at, upload_id → uploads (nullable), recorded_by, recorded_at, note | Provenance for every dimension and position. Never deleted. |
 | `structure_overrides` | id, workspace_id, entity_type (wall/opening), entity_id (nullable for added), field, value | Optional "what if" structure edits inside a design (P3+). |
 | `stores` | id, name, url, notes | Filled in after the store research. |
 | `furniture_items` | id, kind, name, w_in, d_in, h_in, color, store_id → stores, url, price_cents, image_url, status (idea/shortlisted/bought/existing), measurement_status | The catalog. Current's furniture is items with status `existing`. |
 | `placements` | id, workspace_id → workspaces (NULL = Current), room_id → rooms, item_id → furniture_items, x_in, y_in, rotation_deg, action (keep/replace/remove/new), replaces_placement_id → placements | Keep/replace/remove decisions on Current's pieces live here. |
-| `proposals` | id, house_id, created_at, created_by, source_kind (x_bookmark/bot/manual), source_url, source_image_url, inspiration_id → inspiration, target_workspace_id → workspaces (NULL = new), new_workspace_name, title, rationale, cost_low_cents, cost_high_cents, status (proposed/approved/rejected/applied), decided_at, decision_note, base_revision | |
+| `proposals` | id, house_id, created_at, created_by, source_kind (x_bookmark/bot/manual), source_url, source_image_url, inspiration_id → inspiration, target_workspace_id → workspaces (NULL = new), base_workspace_id → workspaces (copied for a new workspace), new_workspace_name, title, rationale, cost_low_cents, cost_high_cents, status (pending/approved/rejected), decided_at, decision_note, base_revision | |
+| `proposal_cost_steps` | id, proposal_id → proposals, sort, step (paint/outlets/lighting/window/furniture/rug/decor/other), changes_text, low_cents, high_cents | Step-by-step cost breakdown; totals are the sums. |
 | `proposal_rooms` | proposal_id, room_id | Target room(s). |
 | `proposal_comments` | id, proposal_id → proposals, author (michael or agent key id), body, created_at | Discussion on a proposal (MCP `comment_on_proposal`). |
 | `proposal_changes` | id, proposal_id → proposals, seq, op (create/update/delete), entity_type (placement/opening/wall/room_style/…), entity_id (NULL for create), field, before_value, after_value, temp_ref | **One row per field change.** A new piece is one `create` with a `temp_ref` plus one row per field. |
@@ -371,9 +372,10 @@ by approving them. Agent keys with `propose` scope can create proposals but can'
 - **Changes:** `proposal_changes` rows, one per changed field, with **before / after** values (move this piece,
   replace that one, change wall color, add an item). It's precise enough to apply automatically.
 - **Rationale:** why it fits the room and the design style
-- **Cost impact:** the change to that design's cost-to-change total (low/high)
-- **Status:** `proposed` → `approved` or `rejected` → `applied`, with dates and an optional
-  comment from Michael
+- **Cost impact:** a **step-by-step breakdown** (`proposal_cost_steps`: step kind, what changes,
+  low/high per step); the proposal's low/high total is the sum of its steps. At least one step is required.
+- **Status (Built in P1):** `pending` → `approved` (approving applies it as a new revision) or `rejected`
+  (kept for the record, nothing changes), with the decision date and an optional note from Michael
 
 **In the editor: a Proposals panel**
 
@@ -384,9 +386,11 @@ by approving them. Agent keys with `propose` scope can create proposals but can'
 - **Approve** applies the changes to the workspace as a new revision. For "new workspace," it creates the
   workspace from Current plus the changes. **Reject** keeps the proposal with status `rejected` and an
   optional reason, so the bot learns what you don't want.
-- If the workspace changed since the proposal was written (its `base_revision` is behind) and a
-  "before" value no longer matches, the editor flags it and won't apply it blindly. You can still
-  apply the parts that match, or reject it.
+- If the workspace changed since the proposal was written and a "before" value no longer matches,
+  approval is refused with a "changed since this was proposed" message instead of applying it blindly
+  (Built). Applying only the parts that still match is a later nice-to-have; for now, reject and re-propose.
+- Proposals are validated in full when they're created (ownership, references, pinned measurements) by
+  applying them in a transaction that is always rolled back, so a pending proposal is known to apply cleanly.
 - Comments from Michael or agents show in a thread on the proposal.
 - The panel is responsive. On a phone, the before/after stacks top and bottom.
 
@@ -465,18 +469,27 @@ house data through a defined set of tools instead of raw database access.
   built with the official MCP TypeScript SDK and mounted in the Hono app. It calls the same service
   layer as the REST API, so the rules (proposals only, revisions, conflict checks) are enforced in
   one place.
-- **Auth:** `Authorization: Bearer <agent key>`. Keys are created and revoked by Michael in the
-  editor (Settings → Agent keys) and stored hashed. Each key has one scope:
+- **Connection details (live):**
+  - URL: `https://app-production-1828.up.railway.app/mcp`
+  - Transport: Streamable HTTP, stateless, JSON responses (`POST` JSON-RPC; send
+    `Accept: application/json, text/event-stream`).
+  - Header: `Authorization: Bearer <agent key>`. The key itself is never written in this repo; this bot
+    keeps its `propose` key as a secret outside the repo. A missing or bad key gets `401`.
+- **Auth:** keys are stored hashed (`agent_keys.key_hash`, SHA-256) and created with
+  `npm run agent-key` (an editor Settings page for keys is later). Each key has one scope:
 
   | Scope | Can do |
   |---|---|
   | `read` | All `list_*` / `get_*` / `search_*` tools, `export_house` |
   | `propose` (default) | `read`, plus `create_proposal`, `comment_on_proposal`, `add_furniture_item`, `add_inspiration`, `upload_reference_image` |
-  | `admin` | `propose`, plus `approve_proposal`, `reject_proposal`, `apply_proposal`, `edit_current`, `rollback_revision`. Normally this is Michael's job in the editor, so no admin key is issued by default. |
+  | `admin` | Same tools as `propose` for now. **Decided (P1):** approving, rejecting, rolling back, saving edits and pinning are done only by Michael in the editor (passkey session); there are no MCP tools for them, and the REST endpoints refuse every agent key, admin included (`403 michael_only`). |
 
 - **This bot** connects to it as a **custom MCP connector** with a `propose` key kept as a bot secret.
   The daily X bookmark routine moves onto it in P1.
-- **Tools (sketch):**
+- **Tools shipped in P1:** `list_workspaces`, `get_workspace`, `get_room`, `list_proposals` (also one by
+  `proposalId`), `create_proposal` (`propose` scope and up), `get_history`. The `create_proposal` description
+  lists every entity and field a change may touch, generated from `server/entities.ts`.
+- **Tools (full sketch; the rest come later):**
 
   | Tool | What it does |
   |---|---|
@@ -515,9 +528,9 @@ Changes from the last version:
 
 **Status (Oct 17, 2026):** deployed at <https://app-production-1828.up.railway.app> (Railway project
 `house-planner`). MySQL is migrated and seeded, and the bucket and nightly export are working. Passkey
-setup is waiting on Michael's first sign-in. Still to do: auto-deploy from GitHub (currently deployed
-with `railway up`), moving `railway.json` to Railway's newer `.railway/railway.ts` before 2026-12-01,
-and turning off Pages once confirmed.
+setup is waiting on Michael's first sign-in. GitHub Pages is now **off**. Still to do: auto-deploy from
+GitHub (currently deployed with `railway up`) and moving `railway.json` to Railway's newer
+`.railway/railway.ts` before 2026-12-01.
 
 - A new Railway project (workspace chosen at setup) with MySQL and a bucket, on the default
   `*.up.railway.app` URL. One Hono (TypeScript) service that serves the static editor and `/api/*`.
@@ -539,6 +552,37 @@ with Face ID on the iPhone and Touch ID on the Mac, `GET /api/house` returns `cu
 test-room workspace with measurement sources, an unauthenticated request gets `401`, and GitHub Pages is off.
 
 ### P1: House data in the editor, Current + workspace tabs, proposals, MCP server
+
+**Status (Oct 17, 2026): built and deployed.** GitHub Pages is off; the Railway URL is the only editor.
+- Editor (`index.html`, `main.js`, `scene.js`, `api.js`) loads every workspace from the API for the signed-in
+  passkey session; signed out it shows a sign-in prompt. Agent keys see it read-only.
+- Tabs: a "Current: none yet" placeholder first, then workspace tabs. Open, close (tabs only; workspaces
+  aren't deleted), rename (double-click), create blank, and copy from any workspace (copy from Current is
+  shown disabled until a Current exists). Deleting workspaces is not built yet.
+- Split view with a Sync toggle (camera angle, zoom, pan, top/3D) shipped here too (pulled in from P2).
+- Michael's direct edits (move, rotate, add, delete, keep/replace/remove action, rename) are saved as
+  `save` revisions with a base-revision conflict check; offline edits wait in `localStorage` and are
+  retried when the browser is back online.
+- Proposals panel (drawer): pending/all filter, source link, target, room, rationale, field-level
+  before/after list, cost steps with low/high, Approve / Reject, and "Preview side by side" (the target
+  workspace on the left, the proposal applied in a rolled-back transaction on the right, changed pieces
+  outlined in green, sync on).
+- History drawer per workspace with "Roll back to here"; a rollback is a new `rollback` revision, can
+  itself be rolled back, never goes past the workspace's seed/copy revision, and keeps pinned values.
+- Measurements panel: enter a value and save it as **measured**, **Pin** it (source `manual`), or
+  **Unpin**. A pin always wins: later scans, estimates, proposals, saves, and rollbacks can't change it
+  (scans/estimates are still recorded for history). API: `POST /api/measurements` (`action: measured | pin`),
+  `POST /api/measurements/unpin`.
+- MCP server at `/mcp` (section 10). Schema changes in migration `0003_p1_proposals_pins`.
+- Deploys run `npm run db:predeploy` as Railway's pre-deploy command: a JSON snapshot of every table to the
+  bucket (`backups/predeploy-*.json`), then `prisma migrate deploy`. If it fails, the old version keeps serving.
+- Tests: `TEST_DATABASE_URL=mysql://… npm test` against a new empty MySQL database (`tests/p1.test.ts`):
+  approve/reject/stale/rollback, pin protection, new-workspace proposals, scopes, and MCP.
+- Not done yet: importing `house-data/proposals/` files (there are none) and `designs.json`; proposal
+  comments; connecting this bot's MCP connector and switching the daily X routine to `create_proposal`
+  (needs the connector set up with the bot's `propose` key); room color styles for Current-based
+  workspaces (draft rooms store colors on the room itself).
+
 - The editor loads the house from the API instead of `catalog.js` defaults, and the test room
   (family room draft) looks identical to today, including the existing furniture.
 - Tab bar: Current (locked) first once it exists, or the "No Current yet" empty state, then workspaces. Add, duplicate, rename, and delete tabs.
@@ -561,6 +605,10 @@ changes nothing. A `propose` key gets an error on `approve_proposal`, and a `rea
 on `create_proposal`.
 
 ### P2: Split view + camera sync + Proposals panel + History UI
+
+**Status:** split view, sync, the before/after proposal preview, and History with restore-to-point shipped
+early in P1. Still open: follow selected room, undo-one-change, flagged partial apply, and a pass on iPhone Safari.
+
 - Show any two tabs side by side (stacked on a phone).
 - Sync toggle: shared orbit angle, zoom, pan, and top/3D mode.
 - Optional: follow selected room.

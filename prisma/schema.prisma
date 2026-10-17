@@ -16,6 +16,7 @@ enum MeasurementSource {
   manual_estimate
   measured
   scan
+  manual // pinned by Michael; never overwritten by scans or estimates
 }
 
 enum OpeningType {
@@ -62,10 +63,9 @@ enum ProposalSourceKind {
 }
 
 enum ProposalStatus {
-  proposed
-  approved
+  pending
+  approved // approved = applied as a new revision
   rejected
-  applied
 }
 
 enum ChangeOp {
@@ -80,6 +80,7 @@ enum RevisionKind {
   proposal
   rescan
   rollback
+  copy
 }
 
 enum CostStepKind {
@@ -177,7 +178,7 @@ model Room {
   inspiration    InspirationRoom[]
   uploadTokens   UploadToken[]
 
-  @@unique([houseId, slug])
+  @@unique([houseId, draftWorkspaceId, slug])
   @@index([draftWorkspaceId])
   @@map("rooms")
 }
@@ -271,6 +272,7 @@ model Measurement {
   recordedBy Actor             @map("recorded_by")
   recordedAt DateTime          @default(now()) @map("recorded_at")
   note       String?           @db.VarChar(500)
+  unpinnedAt DateTime?         @map("unpinned_at") // set when a pin (source=manual, isOverride) is released
 
   upload Upload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
 
@@ -298,6 +300,7 @@ model Workspace {
   structureOverrides StructureOverride[]
   placements         Placement[]
   targetedBy         Proposal[]           @relation("target")
+  baseFor            Proposal[]           @relation("baseFor")
   revisions          Revision[]
   costEstimates      CostEstimate[]
   draftRooms         Room[]               @relation("draftRooms")
@@ -418,25 +421,28 @@ model Proposal {
   sourceImageUrl    String?            @map("source_image_url") @db.VarChar(1000)
   inspirationId     Int?               @map("inspiration_id")
   targetWorkspaceId Int?               @map("target_workspace_id") // NULL = new workspace
+  baseWorkspaceId   Int?               @map("base_workspace_id") // new workspace: copied from this one
   newWorkspaceName  String?            @map("new_workspace_name") @db.VarChar(120)
   title             String             @db.VarChar(200)
   rationale         String?            @db.Text
   costLowCents      Int?               @map("cost_low_cents")
   costHighCents     Int?               @map("cost_high_cents")
-  status            ProposalStatus     @default(proposed)
+  status            ProposalStatus     @default(pending)
   decidedAt         DateTime?          @map("decided_at")
   decisionNote      String?            @map("decision_note") @db.VarChar(1000)
   baseRevision      Int                @default(0) @map("base_revision")
 
-  house            House             @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  agentKey         AgentKey?         @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
-  inspiration      Inspiration?      @relation(fields: [inspirationId], references: [id], onDelete: SetNull)
-  targetWorkspace  Workspace?        @relation("target", fields: [targetWorkspaceId], references: [id], onDelete: SetNull)
-  createdWorkspace Workspace?        @relation("createdFrom")
+  house            House              @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  agentKey         AgentKey?          @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+  inspiration      Inspiration?       @relation(fields: [inspirationId], references: [id], onDelete: SetNull)
+  targetWorkspace  Workspace?         @relation("target", fields: [targetWorkspaceId], references: [id], onDelete: SetNull)
+  baseWorkspace    Workspace?         @relation("baseFor", fields: [baseWorkspaceId], references: [id], onDelete: SetNull)
+  createdWorkspace Workspace?         @relation("createdFrom")
   rooms            ProposalRoom[]
   changes          ProposalChange[]
   comments         ProposalComment[]
   revisions        Revision[]
+  costSteps        ProposalCostStep[]
 
   @@index([status])
   @@map("proposals")
@@ -451,6 +457,22 @@ model ProposalRoom {
 
   @@id([proposalId, roomId])
   @@map("proposal_rooms")
+}
+
+// Step-by-step cost breakdown of a proposal (what changes, low/high per step).
+model ProposalCostStep {
+  id          Int          @id @default(autoincrement())
+  proposalId  Int          @map("proposal_id")
+  sort        Int
+  step        CostStepKind
+  changesText String       @map("changes_text") @db.VarChar(1000)
+  lowCents    Int          @map("low_cents")
+  highCents   Int          @map("high_cents")
+
+  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@index([proposalId, sort])
+  @@map("proposal_cost_steps")
 }
 
 // One row per changed field.

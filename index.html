@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Test room (family room draft) · House planner</title>
+<title>House planner</title>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 <script type="importmap">
@@ -17,11 +17,10 @@
 <div id="app">
   <aside id="sidebar">
     <header>
-      <h1>Test room</h1>
-      <div class="sub">Family room draft · 12' × 13' · 9' ceiling (rough) · 1 unit = 1 ft</div>
+      <h1>House planner</h1>
+      <div class="sub" id="whoami">Loading…</div>
       <div id="houseStatus" class="empty-state" role="status">
         <strong>No Current yet.</strong> Create one from a scan or confirmed measurements.
-        This is an editable test room, not the house as it is.
       </div>
     </header>
 
@@ -31,9 +30,7 @@
         <button id="btn3d" class="active">3D view</button>
         <button id="btnTop">Top view</button>
       </div>
-      <div class="row">
-        <button id="btnWalls">Walls: cutaway (3')</button>
-      </div>
+      <div class="row"><button id="btnWalls">Walls: cutaway (3')</button></div>
       <label class="check"><input type="checkbox" id="snapToggle" checked> Snap to 3"</label>
       <label class="check"><input type="checkbox" id="labelToggle" checked> Show labels</label>
     </section>
@@ -45,21 +42,32 @@
         <button id="btnRotate" disabled>Rotate 90° (R)</button>
         <button id="btnDelete" class="danger" disabled>Delete</button>
       </div>
+      <label id="actionRow" hidden>In this design
+        <select id="actionSel">
+          <option value="existing">existing (as is)</option><option value="keep">keep</option>
+          <option value="replace">replace</option><option value="remove">remove</option><option value="new">new</option>
+        </select>
+      </label>
     </section>
 
     <section>
+      <h2>Measurements</h2>
+      <div id="measPanel" class="muted small">Select a piece, or see the room below.</div>
+    </section>
+
+    <section class="edit-only">
       <h2>Add furniture</h2>
       <div id="catalogList" class="grid"></div>
     </section>
 
-    <section>
+    <section class="edit-only">
       <h2>Custom box</h2>
       <form id="customForm">
         <input id="cName" placeholder="Name" value="Bookshelf" required>
         <div class="row three">
-          <label>W" <input id="cW" type="number" min="1" step="0.5" value="36" required></label>
-          <label>D" <input id="cD" type="number" min="1" step="0.5" value="14" required></label>
-          <label>H" <input id="cH" type="number" min="0.5" step="0.5" value="72" required></label>
+          <label>W" <input id="cW" type="number" min="1" step="1" value="36" required></label>
+          <label>D" <input id="cD" type="number" min="1" step="1" value="14" required></label>
+          <label>H" <input id="cH" type="number" min="1" step="1" value="72" required></label>
         </div>
         <div class="row">
           <label class="grow">Color <input id="cColor" type="color" value="#6b4429"></label>
@@ -69,17 +77,46 @@
     </section>
 
     <section>
-      <h2>Layout</h2>
-      <div class="row">
-        <button id="btnExport">Export JSON</button>
-        <button id="btnImport">Import JSON</button>
-        <input id="importFile" type="file" accept="application/json,.json" hidden>
-      </div>
-      <div class="row"><button id="btnReset" class="danger">Reset to default</button></div>
-      <div id="saveStatus" class="muted small">Autosaves in this browser.</div>
+      <h2>Data</h2>
+      <div class="row"><button id="btnExport">Export workspace JSON</button></div>
+      <div id="saveStatus" class="muted small">Every edit is saved as a revision.</div>
     </section>
   </aside>
-  <main id="viewport"></main>
+
+  <main id="main">
+    <div id="tabbar">
+      <div id="tabs" role="tablist"></div>
+      <div class="tabtools">
+        <div class="menu-wrap">
+          <button id="btnNew" title="New workspace" class="edit-only">＋</button>
+          <div id="newMenu" class="menu" hidden></div>
+        </div>
+        <button id="btnSplit" title="Split view">Split</button>
+        <label class="check sync"><input type="checkbox" id="syncToggle" checked> Sync</label>
+        <button id="btnProposals">Proposals <span id="pendingCount" class="badge" hidden>0</span></button>
+        <button id="btnHistory">History</button>
+      </div>
+    </div>
+    <div id="panes"></div>
+  </main>
+
+  <aside id="drawer" hidden>
+    <div class="drawer-head">
+      <h2 id="drawerTitle">Proposals</h2>
+      <select id="propFilter"><option value="pending">Pending</option><option value="">All</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+      <button id="drawerClose" aria-label="Close">✕</button>
+    </div>
+    <div id="drawerBody"></div>
+  </aside>
+
+  <div id="signin" class="overlay" hidden>
+    <div class="card">
+      <h2>Sign in</h2>
+      <p>Sign in with your passkey to load your house.</p>
+      <a class="button" href="/login">Sign in</a>
+    </div>
+  </div>
+  <div id="toast" hidden></div>
   <button id="toggleSidebar" aria-label="Toggle panel">☰</button>
 </div>
 <script type="module" src="main.js"></script>

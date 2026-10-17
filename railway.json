@@ -1,10 +1,15 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
-  "build": { "builder": "RAILPACK" },
+  "build": {
+    "builder": "RAILPACK"
+  },
   "deploy": {
     "startCommand": "npm start",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 120,
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ON_FAILURE",
+    "preDeployCommand": [
+      "npm run db:predeploy"
+    ]
   }
 }
