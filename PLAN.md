@@ -597,6 +597,14 @@ and a pinned manual value survives the import.
 ### P7: iOS App Clip scanner (phone-first)
 - TestFlight spike: does RoomPlan run in an App Clip? Then build the parent app + clip for scanning
   and photos. The clip uploads to the Railway API with a single-use upload token.
+- **Primary build path:** Michael's Mac with Xcode, signed with his Apple Developer account, and shipped
+  through TestFlight.
+- **Alternative build paths (later):** possible routes to automated builds by the bot or CI. Neither is needed for P7.
+  - [xtool](https://xtool.sh): an open-source, cross-platform Xcode replacement. It builds and signs
+    SwiftPM / SwiftUI apps on Linux using an SDK extracted from `Xcode.xip`, and installs to a device over
+    USB. **App Clip support is unverified.**
+  - [ios-builder](https://github.com/MobAI-App/ios-builder): builds on GitHub Actions, Codemagic, or
+    Bitrise and uploads to TestFlight through the App Store Connect API.
 
 **Done when:** from the iPhone, tapping "Scan room" opens the clip, completes a scan, and the room
 appears in the editor ready to confirm, with no manual file transfer.
