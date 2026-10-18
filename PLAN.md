@@ -9,8 +9,8 @@ Each phase lists what gets built and how we'll know it's done. Decisions made so
 **Rooms:** there's no fixed order after the family room. **Decided:** we pick the next room as we go.
 
 **Devices (Decided):** viewing and editing are **web-first**: a responsive web app that works in
-desktop and phone browsers. The iOS **App Clip is phone-first** and only for scanning rooms and
-taking photos.
+desktop and phone browsers. The **iPhone app** (full app, TestFlight; the App Clip was dropped
+Oct 17) is for scanning rooms, taking photos and capturing furniture models.
 
 ---
 
@@ -162,7 +162,7 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
 ### Pieces
 
 ```
- Phone / laptop browser             AI agents incl. this bot          iOS App Clip (later)
+ Phone / laptop browser             AI agents incl. this bot          iPhone app (TestFlight)
         │  session cookie                 │  agent API key (MCP)            │  upload token
         ▼                                 ▼                                 ▼
  ┌──────────────────────── new Railway project "house-planner" (*.up.railway.app) ──────────┐
@@ -201,7 +201,7 @@ other projects. This replaces the earlier plan of a private GitHub repo with a t
   key made it.
 
 - **File storage: Railway's S3-compatible bucket (object storage)**, not a volume. A bucket isn't
-  tied to one service, lets the App Clip and browser upload directly with presigned URLs, and egress
+  tied to one service, lets the iPhone app and browser upload directly with presigned URLs, and egress
   is free. A volume would pin storage to one service and make redeploys and backups clumsier.
 
 ### Database schema (MySQL, fully relational)
@@ -413,7 +413,8 @@ on LiDAR iPhones, then export and upload in the editor:
 - Every scanned value is stored in `measurements` with `source = scan`. Manual overrides still win,
   and differences over 1" are listed for review.
 
-**Step 2: iOS App Clip for scanning and photos (phone-first).**
+**Step 2: iOS App Clip for scanning and photos (phone-first).** *(Superseded Oct 17, 2026: Michael
+dropped the App Clip for one full TestFlight app; see P7.)*
 
 - What's available: an Apple Developer account, a LiDAR iPhone Pro, and a Mac with Xcode set up.
 - Flow: tap "Scan room" in the web app (or scan a QR code) → the App Clip opens → RoomPlan scan,
@@ -487,7 +488,11 @@ house data through a defined set of tools instead of raw database access.
 - **This bot** connects to it as a **custom MCP connector** with a `propose` key kept as a bot secret.
   The daily X bookmark routine moves onto it in P1.
 - **Tools shipped in P1:** `list_workspaces`, `get_workspace`, `get_room`, `list_proposals` (also one by
-  `proposalId`), `create_proposal` (`propose` scope and up), `get_history`. The `create_proposal` description
+  `proposalId`), `create_proposal` (`propose` scope and up), `get_history`.
+- **Tools added in P7 (Oct 17):** read: `list_room_photos` (signed URLs, 10 min), `get_scan_import`,
+  `list_templates`, `list_models`; propose (proposals only, Michael approves): `propose_colors`
+  (wall/trim/floor/device colors for a room in a workspace), `propose_furniture_template` (template +
+  parameters for a placement), `propose_attach_model` (attach or detach a USDZ/GLB). The `create_proposal` description
   lists every entity and field a change may touch, generated from `server/entities.ts`.
 - **Tools (full sketch; the rest come later):**
 
@@ -659,34 +664,32 @@ the measured widths (3 ft walkway + 2.5 ft), and a workspace can span both rooms
 12 × 13 ft with the fireplace and window in the right places, you can fix any errors with P3 tools,
 and a pinned manual value survives the import.
 
-### P7: iOS App Clip scanner (phone-first) **[server live, iOS not yet built - Oct 17, 2026]**
+### P7: iPhone app: scans, photos, furniture models **[live Oct 17, 2026; iOS built by Michael in Xcode]**
 
-Pairing, upload, import, review, and promote to Current, end to end. Details: `SCAN_SETUP.md`
-(server) and `ios/README.md` (Mac steps).
+**Decided (Oct 17):** one full iOS app, **no App Clip** (team `Q3HHMS5MLX`, bundle id
+`com.michaelbradley.houseplanner`, TestFlight). Pairing stays code/QR; `/scan?token=` is a universal
+link (AASA `applinks`) that opens the app. Details: `SCAN_SETUP.md` (server) and `ios/README.md`.
 
-- **Pairing:** "Pair phone" in the editor (Michael's session only) makes a one-scan code with a
-  QR code. The code is hashed, expires after 60 minutes, allows 12 files, and is bound to a
-  Current room or to a new room.
-- **Uploads:** presigned PUTs to the Railway bucket (RoomPlan JSON, USDZ, photos). Each upload is
-  bound to its code.
-- **Parser:** Apple's `CapturedRoom` Codable JSON (keyed-enum categories, `simd_float3`
-  dimensions, column-major transforms, `parentIdentifier`) converted to walls and openings.
-- **Review:** pending scans are drawn next to Current. Promote/Reject is Michael only and never
-  automatic. A rescan matches existing walls and openings, so ids and pins survive. Pins always
-  win, and every scan value is kept as a measurement. Current revisions can be rolled back.
-- **iOS:** parent app + App Clip in `ios/`. RoomPlan via `RoomCaptureView` and
-  `RoomCaptureViewDelegate`. Not compiled yet; Michael builds it in Xcode.
-- **Build path (Decided): Xcode on Michael's Mac only.** He builds, signs (Apple Developer account), and
-  uploads to TestFlight from Xcode. We don't use Linux or cloud iOS builds (including GitHub Actions
-  macOS runners, which are too expensive). The bot writes the Swift code into the repo, and Michael
-  builds it.
-
-**Done when:**
-- Michael generates a pairing code in the web app
-- Scans the room with the App Clip (RoomPlan + photos)
-- The scan uploads and appears as a reviewable import in the editor
-- He can preview it in 3D, fix with existing tools, then click "Promote to Current" to create the locked Current
-- Rescans propose updates without overwriting pinned manual values
+- **First real scan (Oct 17, 8:47 PM EDT):** scan import #1 promoted to Current room 8 "Family room"
+  (no photos); scan import #2, a rescan with 4 photos, was rejected. The photos are linked to room 8.
+- **Parser fix:** the plan uses y = −world Z. Earlier scans were drawn mirrored; they are marked
+  `plan_frame = 1`, and room 8 shows a Michael-only *Fix mirror* button (one rollback-able revision).
+- **Pairing:** "Pair phone" (room scan: 24 files, 60 minutes, one import) or "Capture this piece"
+  (one model for one placement). Codes are hashed and single-use.
+- **Phone:** RoomPlan scan → guided photos with notes (linked to the scan import and room via
+  `scan_photos`) → import. Tape-measure notes become measurement proposals. Object Capture +
+  on-device photogrammetry make a USDZ attached to a placement. Foundation Models (iOS 26, with
+  fallbacks) label objects, tag photos and structure measurement notes.
+- **Photos:** in the scan Review panel and a room photo strip, via 10-minute signed URLs (session or
+  read-scope agent key; MCP `list_room_photos`).
+- **Furniture templates:** 14 adjustable types (`templates`, `template_params`, `placement_params`);
+  scanned objects map to the closest one ("Furnish from scan"). An uploaded USDZ/GLB wins over the
+  template; the viewer renders it with three.js `USDLoader`/`GLTFLoader` and falls back to the
+  template with a "custom model" badge.
+- **Review:** Promote/Reject is Michael only and never automatic. Pins always win.
+- **Build path (Decided): Xcode on Michael's Mac only.** He builds, signs and uploads to TestFlight
+  from Xcode. No Linux or cloud iOS builds (no GitHub Actions macOS runners). The bot writes the Swift
+  code into the repo.
 
 ---
 
@@ -694,8 +697,8 @@ Pairing, upload, import, review, and promote to Current, end to end. Details: `S
 
 Answered and folded in: storage (Railway + MySQL, fully relational), furniture (MySQL only),
 Railway (a new project), URL (default `railway.app` for now), hosting (Railway only;
-Pages turned off once Railway is live), devices (web-first; App Clip phone-first for scans and
-photos), measurements (rough manual first, refined later, with provenance and manual overrides),
+Pages turned off once Railway is live), devices (web-first; the iPhone app for scans, photos and
+furniture models), measurements (rough manual first, refined later, with provenance and manual overrides),
 room order (as we go), existing furniture (keep / replace / remove), budget (cost-to-change
 estimates instead), and agent access (MCP server, proposals only by default).
 

@@ -103,9 +103,11 @@ test('pairing codes are bound to their own uploads, limited, and spent on import
   assert.equal((await importScan(a, pa.json.uploadId, { dimensions: [1, 2, 3] })).status, 400);
   const ok = await importScan(a, pa.json.uploadId, SAMPLE_ROOM);
   assert.equal(ok.status, 201);
-  // Spent: everything with this code is now 401.
-  assert.equal((await http('POST', '/api/upload-tokens/validate', { token: a }, 'none')).status, 401);
+  // Spent: uploads with this code are now 401; validate says spent (it can still send suggestions until expiry).
+  const spent = await http('POST', '/api/upload-tokens/validate', { token: a }, 'none');
+  assert.equal(spent.status, 200); assert.equal(spent.json.spent, true); assert.equal(spent.json.valid, false); assert.equal(spent.json.uploadsLeft, 0);
   assert.equal((await presign(a)).status, 401);
+  assert.equal((await presign(a, 'photo', 'jpg')).status, 401);
   // Expired codes are 401; the per-code file limit is enforced.
   await prisma.uploadToken.updateMany({ where: { tokenHash: sha256(b.replace(/-/g, '')) }, data: { expiresAt: new Date(Date.now() - 1000) } });
   assert.equal((await presign(b)).json.error, 'token_expired');

@@ -27,7 +27,7 @@ export const api = {
   reject: (id, note) => req('POST', `/api/proposals/${id}/reject`, { note }),
   measure: (body) => req('POST', '/api/measurements', body),
   unpin: (body) => req('POST', '/api/measurements/unpin', body),
-  pairPhone: (scope) => req('POST', '/api/upload-tokens', scope), // { roomId } or { newRoom: true, label }
+  pairPhone: (scope) => req('POST', '/api/upload-tokens', scope), // { roomId } | { newRoom: true, label } | { placementId }
   scans: (status) => req('GET', `/api/scans${status ? `?status=${status}` : ''}`),
   scan: (id) => req('GET', `/api/scans/${id}`),
   promoteScan: (id) => req('POST', `/api/scans/${id}/promote`),
@@ -35,4 +35,17 @@ export const api = {
   currentHistory: () => req('GET', '/api/current/history?limit=100'),
   rollbackCurrent: (toRevision) => req('POST', '/api/current/rollback', { toRevision }),
   exportHouse: () => req('GET', '/api/export'),
+  templates: () => req('GET', '/api/templates'),
+  photos: (q) => req('GET', `/api/photos?${new URLSearchParams(q)}`),
+  furnishScan: (id, name) => req('POST', `/api/scans/${id}/furnish`, { name }),
+  fixMirror: (roomId) => req('POST', `/api/rooms/${roomId}/fix-mirror`),
+  setModel: (placementId, modelId) => req('POST', `/api/placements/${placementId}/model`, { modelId }),
+  async uploadModel(file, { label, placementId }) {
+    const format = /\.glb$/i.test(file.name) ? 'glb' : 'usdz';
+    const q = new URLSearchParams({ format, label, ...(placementId ? { placementId: String(placementId) } : {}) });
+    const res = await fetch(`/api/models?${q}`, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/octet-stream' }, body: file });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, data);
+    return data;
+  },
 };

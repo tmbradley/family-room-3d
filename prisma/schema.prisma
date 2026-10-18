@@ -98,6 +98,7 @@ enum UploadKind {
   scan
   photo
   reference
+  model
 }
 
 enum UploadFormat {
@@ -114,6 +115,28 @@ enum UploadStatus {
   uploaded
   imported
   rejected
+}
+
+enum TokenPurpose {
+  scan
+  model
+}
+
+enum ProposalKind {
+  changes
+  measurements
+}
+
+enum TemplateParamType {
+  number
+  choice
+  color
+  boolean
+}
+
+enum ModelSource {
+  object_capture
+  upload
 }
 
 enum ScanImportStatus {
@@ -149,6 +172,7 @@ model House {
   revisions   Revision[]
   uploads     Upload[]
   scanImports ScanImport[]
+  models      FurnitureModel[]
 
   @@map("houses")
 }
@@ -162,6 +186,8 @@ model Room {
   originYIn         Int               @default(0) @map("origin_y_in")
   rotationDeg       Int               @default(0) @map("rotation_deg")
   ceilingIn         Int               @map("ceiling_in")
+  /// For rooms made from a scan: the scan's plan frame (1 = mirror image, fix with /api/rooms/:id/fix-mirror).
+  planFrame         Int?              @map("plan_frame")
   floorMaterial     String?           @map("floor_material") @db.VarChar(80)
   floorFinish       String?           @map("floor_finish") @db.VarChar(80)
   floorColor        String?           @map("floor_color") @db.VarChar(9)
@@ -185,6 +211,8 @@ model Room {
   inspiration    InspirationRoom[]
   uploadTokens   UploadToken[]
   scanImports    ScanImport[]
+  photos         ScanPhoto[]
+  roomStyles     RoomStyle[]
 
   @@unique([houseId, draftWorkspaceId, slug])
   @@index([draftWorkspaceId])
@@ -312,6 +340,7 @@ model Workspace {
   revisions          Revision[]
   costEstimates      CostEstimate[]
   draftRooms         Room[]               @relation("draftRooms")
+  roomStyles         RoomStyle[]
 
   @@map("workspaces")
 }
@@ -405,12 +434,18 @@ model Placement {
   replacesPlacementId Int?              @map("replaces_placement_id")
   notes               String?           @db.VarChar(500)
   measurementStatus   MeasurementSource @default(manual_estimate) @map("measurement_status")
+  templateId          Int?              @map("template_id") // parametric template used to draw it
+  modelId             Int?              @map("model_id") // captured/uploaded 3D model; wins over the template
 
-  workspace  Workspace?     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  room       Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  item       FurnitureItem  @relation(fields: [itemId], references: [id], onDelete: Restrict)
-  replaces   Placement?     @relation("replaces", fields: [replacesPlacementId], references: [id], onDelete: SetNull)
-  replacedBy Placement[]    @relation("replaces")
+  template   FurnitureTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  model      FurnitureModel?    @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  params     PlacementParam[]
+  tokens     UploadToken[]
+  workspace  Workspace?         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room       Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  item       FurnitureItem      @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  replaces   Placement?         @relation("replaces", fields: [replacesPlacementId], references: [id], onDelete: SetNull)
+  replacedBy Placement[]        @relation("replaces")
   costItems  CostStepItem[]
 
   @@map("placements")
@@ -440,17 +475,20 @@ model Proposal {
   decisionNote      String?            @map("decision_note") @db.VarChar(1000)
   baseRevision      Int                @default(0) @map("base_revision")
 
-  house            House              @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  agentKey         AgentKey?          @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
-  inspiration      Inspiration?       @relation(fields: [inspirationId], references: [id], onDelete: SetNull)
-  targetWorkspace  Workspace?         @relation("target", fields: [targetWorkspaceId], references: [id], onDelete: SetNull)
-  baseWorkspace    Workspace?         @relation("baseFor", fields: [baseWorkspaceId], references: [id], onDelete: SetNull)
-  createdWorkspace Workspace?         @relation("createdFrom")
+  house            House                 @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  agentKey         AgentKey?             @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+  inspiration      Inspiration?          @relation(fields: [inspirationId], references: [id], onDelete: SetNull)
+  targetWorkspace  Workspace?            @relation("target", fields: [targetWorkspaceId], references: [id], onDelete: SetNull)
+  baseWorkspace    Workspace?            @relation("baseFor", fields: [baseWorkspaceId], references: [id], onDelete: SetNull)
+  createdWorkspace Workspace?            @relation("createdFrom")
   rooms            ProposalRoom[]
   changes          ProposalChange[]
   comments         ProposalComment[]
   revisions        Revision[]
   costSteps        ProposalCostStep[]
+  kind             ProposalKind          @default(changes)
+  measurements     ProposalMeasurement[]
+  photos           ProposalPhoto[]
 
   @@index([status])
   @@map("proposals")
@@ -611,25 +649,27 @@ model CostStepItem {
 // ---------- Files and inspiration ----------
 
 model Upload {
-  id            Int          @id @default(autoincrement())
-  houseId       Int          @map("house_id")
-  roomId        Int?         @map("room_id")
-  tokenId       Int?         @map("token_id")
-  kind          UploadKind
-  format        UploadFormat
-  bucketKey     String       @unique @map("bucket_key") @db.VarChar(500)
-  bytes         Int?
-  status        UploadStatus @default(pending)
-  uploadedBy    Actor        @map("uploaded_by")
-  scanImportId  Int?         @map("scan_import_id")
-  createdAt     DateTime     @default(now()) @map("created_at")
+  id           Int          @id @default(autoincrement())
+  houseId      Int          @map("house_id")
+  roomId       Int?         @map("room_id")
+  tokenId      Int?         @map("token_id")
+  kind         UploadKind
+  format       UploadFormat
+  bucketKey    String       @unique @map("bucket_key") @db.VarChar(500)
+  bytes        Int?
+  status       UploadStatus @default(pending)
+  uploadedBy   Actor        @map("uploaded_by")
+  scanImportId Int?         @map("scan_import_id")
+  createdAt    DateTime     @default(now()) @map("created_at")
 
-  house        House         @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  room         Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  token        UploadToken?  @relation(fields: [tokenId], references: [id], onDelete: SetNull)
-  scanImport   ScanImport?   @relation("scanFiles", fields: [scanImportId], references: [id], onDelete: SetNull)
+  house        House           @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  room         Room?           @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  token        UploadToken?    @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+  scanImport   ScanImport?     @relation("scanFiles", fields: [scanImportId], references: [id], onDelete: SetNull)
   measurements Measurement[]
-  primaryFor   ScanImport[]  @relation("primaryUpload")
+  primaryFor   ScanImport[]    @relation("primaryUpload")
+  photo        ScanPhoto?
+  model        FurnitureModel?
 
   @@index([scanImportId])
   @@index([tokenId])
@@ -782,19 +822,23 @@ model AgentKey {
 }
 
 model UploadToken {
-  id          Int       @id @default(autoincrement())
-  tokenHash   String    @unique @map("token_hash") @db.Char(64)
-  roomId      Int?      @map("room_id")
-  newRoom     Boolean   @default(false) @map("new_room")
-  roomLabel   String?   @map("room_label") @db.VarChar(120)
-  uploadLimit Int       @default(12) @map("upload_limit")
-  uploadCount Int       @default(0) @map("upload_count")
-  expiresAt   DateTime  @map("expires_at")
-  usedAt      DateTime? @map("used_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  id              Int          @id @default(autoincrement())
+  tokenHash       String       @unique @map("token_hash") @db.Char(64)
+  roomId          Int?         @map("room_id")
+  newRoom         Boolean      @default(false) @map("new_room")
+  roomLabel       String?      @map("room_label") @db.VarChar(120)
+  uploadLimit     Int          @default(12) @map("upload_limit")
+  uploadCount     Int          @default(0) @map("upload_count")
+  expiresAt       DateTime     @map("expires_at")
+  usedAt          DateTime?    @map("used_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  purpose         TokenPurpose @default(scan)
+  placementId     Int?         @map("placement_id") // purpose = model: the placement the captured model is for
+  suggestionCount Int          @default(0) @map("suggestion_count")
 
-  room    Room?    @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  uploads Upload[]
+  room      Room?      @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  placement Placement? @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  uploads   Upload[]
 
   @@map("upload_tokens")
 }
@@ -808,15 +852,18 @@ model ScanImport {
   status     ScanImportStatus @default(pending)
   label      String?          @db.VarChar(120)
   notes      String?          @db.Text
+  /// 1 = parsed before the mirror fix (plan y = world Z, a mirror image); 2 = plan y = -world Z.
+  planFrame  Int              @default(1) @map("plan_frame")
   promotedAt DateTime?        @map("promoted_at")
   promotedBy Actor?           @map("promoted_by")
   createdAt  DateTime         @default(now()) @map("created_at")
 
-  house       House             @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  room        Room?             @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  upload      Upload            @relation("primaryUpload", fields: [uploadId], references: [id], onDelete: Cascade)
-  data        ScanImportData[]
-  files       Upload[]          @relation("scanFiles")
+  house  House            @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  room   Room?            @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  upload Upload           @relation("primaryUpload", fields: [uploadId], references: [id], onDelete: Cascade)
+  data   ScanImportData[]
+  files  Upload[]         @relation("scanFiles")
+  photos ScanPhoto[]
 
   @@index([houseId])
   @@index([status])
@@ -836,4 +883,174 @@ model ScanImportData {
 
   @@index([scanImportId])
   @@map("scan_import_data")
+}
+
+/// A photo from the iPhone app: which scan it was taken with, which room it shows, and the
+/// note Michael typed or dictated. The file itself is the linked upload (in the bucket).
+model ScanPhoto {
+  id           Int      @id @default(autoincrement())
+  uploadId     Int      @unique @map("upload_id")
+  scanImportId Int?     @map("scan_import_id")
+  roomId       Int?     @map("room_id")
+  prompt       String?  @db.VarChar(120) // guided-photo prompt it answered, e.g. "Outlets and switches"
+  note         String?  @db.VarChar(1000)
+  roomTag      String?  @map("room_tag") @db.VarChar(60) // room named in the note (on-device model or keywords)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  upload     Upload          @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  scanImport ScanImport?     @relation(fields: [scanImportId], references: [id], onDelete: SetNull)
+  room       Room?           @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  tags       PhotoTag[]
+  proposals  ProposalPhoto[]
+
+  @@index([scanImportId])
+  @@index([roomId])
+  @@map("scan_photos")
+}
+
+model PhotoTag {
+  photoId Int    @map("photo_id")
+  tag     String @db.VarChar(40)
+
+  photo ScanPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+
+  @@id([photoId, tag])
+  @@map("photo_tags")
+}
+
+/// Parametric furniture library (synced from server/templates.ts at startup).
+model FurnitureTemplate {
+  id         Int    @id @default(autoincrement())
+  slug       String @unique @db.VarChar(40)
+  name       String @db.VarChar(80)
+  kind       String @db.VarChar(40) // furniture_items.kind it draws as
+  defaultWIn Int    @map("default_w_in")
+  defaultDIn Int    @map("default_d_in")
+  defaultHIn Int    @map("default_h_in")
+
+  params     TemplateParam[]
+  categories TemplateCategory[]
+  placements Placement[]
+
+  @@map("furniture_templates")
+}
+
+/// RoomPlan object categories a template can stand in for.
+model TemplateCategory {
+  templateId Int    @map("template_id")
+  category   String @db.VarChar(40)
+
+  template FurnitureTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@id([templateId, category])
+  @@map("template_categories")
+}
+
+model TemplateParam {
+  id           Int               @id @default(autoincrement())
+  templateId   Int               @map("template_id")
+  key          String            @db.VarChar(40)
+  label        String            @db.VarChar(80)
+  type         TemplateParamType
+  defaultValue String            @map("default_value") @db.VarChar(120)
+  minValue     Int?              @map("min_value")
+  maxValue     Int?              @map("max_value")
+  sort         Int               @default(0)
+
+  template FurnitureTemplate     @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  options  TemplateParamOption[]
+
+  @@unique([templateId, key])
+  @@map("template_params")
+}
+
+model TemplateParamOption {
+  paramId Int    @map("param_id")
+  value   String @db.VarChar(60)
+  label   String @db.VarChar(80)
+  sort    Int    @default(0)
+
+  param TemplateParam @relation(fields: [paramId], references: [id], onDelete: Cascade)
+
+  @@id([paramId, value])
+  @@map("template_param_options")
+}
+
+/// One template parameter value for a placement (e.g. armStyle = track).
+model PlacementParam {
+  id          Int    @id @default(autoincrement())
+  placementId Int    @map("placement_id")
+  key         String @db.VarChar(40)
+  value       String @db.VarChar(120)
+
+  placement Placement @relation(fields: [placementId], references: [id], onDelete: Cascade)
+
+  @@unique([placementId, key])
+  @@map("placement_params")
+}
+
+/// A 3D model of one piece (Object Capture USDZ from the iPhone, or a USDZ/GLB Michael uploaded).
+model FurnitureModel {
+  id        Int         @id @default(autoincrement())
+  houseId   Int         @map("house_id")
+  uploadId  Int         @unique @map("upload_id")
+  label     String      @db.VarChar(160)
+  source    ModelSource
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  house      House       @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  upload     Upload      @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  placements Placement[]
+
+  @@map("furniture_models")
+}
+
+/// Colors for a room within one workspace (works for Current rooms a workspace links, and drafts).
+model RoomStyle {
+  id              Int     @id @default(autoincrement())
+  workspaceId     Int     @map("workspace_id")
+  roomId          Int     @map("room_id")
+  wallColorName   String? @map("wall_color_name") @db.VarChar(60)
+  wallColor       String? @map("wall_color") @db.VarChar(9)
+  trimColorName   String? @map("trim_color_name") @db.VarChar(60)
+  trimColor       String? @map("trim_color") @db.VarChar(9)
+  floorColorName  String? @map("floor_color_name") @db.VarChar(60)
+  floorColor      String? @map("floor_color") @db.VarChar(9)
+  deviceColorName String? @map("device_color_name") @db.VarChar(60) // outlets and switches
+  deviceColor     String? @map("device_color") @db.VarChar(9)
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, roomId])
+  @@map("room_styles")
+}
+
+/// Measurement suggestions (from notes on the iPhone). Approving records them as measurements.
+model ProposalMeasurement {
+  id         Int     @id @default(autoincrement())
+  proposalId Int     @map("proposal_id")
+  seq        Int
+  entityType String  @map("entity_type") @db.VarChar(40)
+  entityId   Int     @map("entity_id")
+  field      String  @db.VarChar(60)
+  valueIn    Int     @map("value_in")
+  beforeIn   Int?    @map("before_in")
+  note       String? @db.VarChar(500)
+
+  proposal Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+
+  @@index([proposalId])
+  @@map("proposal_measurements")
+}
+
+model ProposalPhoto {
+  proposalId Int @map("proposal_id")
+  photoId    Int @map("photo_id")
+
+  proposal Proposal  @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  photo    ScanPhoto @relation(fields: [photoId], references: [id], onDelete: Cascade)
+
+  @@id([proposalId, photoId])
+  @@map("proposal_photos")
 }

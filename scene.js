@@ -3,6 +3,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { USDLoader } from 'three/addons/loaders/USDLoader.js';
 
 const CUT = 3;            // cutaway wall height (ft)
 const SNAP_FT = 0.25;     // 3"
@@ -140,6 +142,193 @@ const BUILDERS = {
   box(g, w, d, h, it) { g.add(box(w, h, d, mat(it.color || '#8a7d70'), 0, 0, 0)); },
 };
 
+// ---------------------------------------------------------------------------
+// Parametric templates (server/templates.ts). Same local frame as above; params arrive as strings.
+// ---------------------------------------------------------------------------
+let TEMPLATE_DEFAULTS = new Map(); // slug -> { key: default }
+export function setTemplates(list) {
+  TEMPLATE_DEFAULTS = new Map(list.map((t) => [t.slug, Object.fromEntries(t.params.map((p) => [p.key, p.default]))]));
+}
+const WOOD = { walnut: '#5a3a22', oak: '#a87a4a', white_oak: '#c9a978', ebony: '#2a201b', painted_white: '#efece6' };
+const METAL = { brass: '#b8913f', black: '#1d1d1d', chrome: '#c9ccd0', bronze: '#6e4b2e' };
+const woodMat = (prm) => mat(WOOD[prm.woodTone] ?? WOOD.walnut, { roughness: 0.55 });
+const metalMat = (prm) => mat(METAL[prm.metalFinish] ?? METAL.brass, { metalness: 0.85, roughness: 0.3 });
+const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+/** Legs (or a plinth) under a w x d footprint; returns the leg height used (ft). */
+function templateLegs(g, w, d, prm, legMat, inset = 0.2) {
+  const h = ft(num(prm.legHeightIn, 4));
+  const style = prm.legStyle ?? 'tapered';
+  if (h <= 0.01) return 0;
+  if (style === 'plinth') { g.add(box(w - 0.15, h, d - 0.15, mat('#2b2522', { roughness: 0.8 }), 0, 0, 0)); return h; }
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+    const x = sx * (w / 2 - inset), z = sz * (d / 2 - inset);
+    if (style === 'block') g.add(box(0.22, h, 0.22, legMat, x, 0, z));
+    else if (style === 'metal') { const m = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, h, 8), legMat); m.position.set(x, h / 2, z); m.castShadow = true; g.add(m); }
+    else g.add(taperedLeg(h, legMat, x, z));
+  }
+  return h;
+}
+function seat(g, w, d, h, prm, { fabric, legs, arms = true, back = true }) {
+  const base = templateLegs(g, w, d, prm, legs, 0.3);
+  const armStyle = arms ? prm.armStyle ?? 'track' : 'none', arm = armStyle === 'none' ? 0 : 0.45;
+  const seatD = Math.min(d - 0.3, ft(num(prm.seatDepthIn, 22)) + 0.2), backD = Math.max(0.35, d - seatD);
+  const seatH = Math.max(0.6, 1.5 - base);
+  g.add(box(w, 0.45, d, fabric, 0, base, 0));
+  if (back) g.add(box(w, Math.max(h - base - 0.45, 0.4), backD, fabric, 0, base + 0.45, -d / 2 + backD / 2));
+  if (arm) for (const s of [-1, 1]) {
+    const ah = armStyle === 'slope' ? 0.75 : 1.0;
+    const a = box(arm, ah, d, fabric, s * (w / 2 - arm / 2), base + 0.45, 0);
+    g.add(a);
+    if (armStyle === 'rolled') { const r = new THREE.Mesh(new THREE.CylinderGeometry(arm * 0.6, arm * 0.6, d, 16), fabric); r.rotation.x = Math.PI / 2; r.position.set(s * (w / 2 - arm / 2), base + 0.45 + ah, 0); r.castShadow = true; g.add(r); }
+  }
+  const n = Math.max(1, Math.round(num(prm.cushionCount, w > 5 ? 3 : 1))), cw = (w - 2 * arm) / n;
+  const cush = mat(prm.fabricColor || '#5b5f66', { roughness: 1 });
+  for (let i = 0; i < n; i++) g.add(box(cw - 0.05, Math.min(0.38, seatH * 0.5), seatD - 0.05, cush, -w / 2 + arm + cw * (i + 0.5), base + 0.45, d / 2 - seatD / 2));
+}
+const TEMPLATE_BUILDERS = {
+  sofa(g, w, d, h, prm) { seat(g, w, d, h, prm, { fabric: mat(prm.fabricColor, { roughness: 0.95 }), legs: prm.legStyle === 'metal' ? metalMat(prm) : woodMat(prm) }); },
+  armchair(g, w, d, h, prm) { seat(g, w, d, h, { ...prm, cushionCount: 1 }, { fabric: mat(prm.fabricColor, { roughness: 0.9 }), legs: prm.legStyle === 'metal' ? metalMat(prm) : woodMat(prm) }); },
+  swivel_chair(g, w, d, h, prm) {
+    const fab = mat(prm.fabricColor, { roughness: 0.9 }), met = metalMat(prm), r = Math.min(w, d) / 2;
+    if (prm.baseStyle === 'star') for (let i = 0; i < 5; i++) { const a = box(r * 0.9, 0.08, 0.12, met, 0, 0.05, 0); a.geometry.translate(r * 0.45, 0, 0); a.rotation.y = (i * 2 * Math.PI) / 5; g.add(a); }
+    else { const disc = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.75, r * 0.8, 0.08, 32), met); disc.position.y = 0.04; g.add(disc); }
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.7, 12), met); post.position.y = 0.4; g.add(post);
+    const tub = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 0.92, 0.75, 32, 1, false, Math.PI * 0.15, Math.PI * 1.7), fab);
+    tub.rotation.y = Math.PI / 2 + Math.PI * 0.0; tub.position.y = 0.75 + 0.375; tub.castShadow = true; g.add(tub);
+    const back = new THREE.Mesh(new THREE.CylinderGeometry(r, r, Math.max(h - 1.5, 0.4), 32, 1, true, Math.PI * 0.65, Math.PI * 0.7), mat(prm.fabricColor, { side: THREE.DoubleSide }));
+    back.position.y = 1.5 + Math.max(h - 1.5, 0.4) / 2; g.add(back);
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.85, r * 0.85, 0.3, 32), mat(prm.fabricColor, { roughness: 1 })); c.position.y = 1.3; g.add(c);
+  },
+  l_sectional(g, w, d, h, prm) {
+    // A run across the back (w) plus a chaise along one end, chaiseDepthIn long (clamped to d).
+    const fab = mat(prm.fabricColor, { roughness: 0.95 }), cush = mat(prm.fabricColor, { roughness: 1 });
+    const legs = prm.legStyle === 'metal' ? metalMat(prm) : woodMat(prm);
+    const side = prm.chaiseSide === 'left' ? -1 : 1;
+    const seatD = Math.min(ft(num(prm.seatDepthIn, 22)) + 0.95, d * 0.6), backD = 0.7, base = Math.max(ft(num(prm.legHeightIn, 4)), 0.01), cushH = 0.35;
+    const chL = Math.min(ft(num(prm.chaiseDepthIn, 66)), d), chW = seatD;
+    const armStyle = prm.armStyle ?? 'track', arm = armStyle === 'none' ? 0 : 0.45;
+    if (prm.legStyle !== 'plinth' && base > 0.02) {
+      for (const [x, z] of [[-w / 2 + 0.25, -d / 2 + 0.25], [w / 2 - 0.25, -d / 2 + 0.25], [-side * (w / 2 - 0.25), -d / 2 + seatD - 0.25], [side * (w / 2 - 0.25), -d / 2 + chL - 0.25], [side * (w / 2 - chW + 0.25), -d / 2 + chL - 0.25]])
+        g.add(prm.legStyle === 'block' ? box(0.2, base, 0.2, legs, x, 0, z) : taperedLeg(base, legs, x, z));
+    }
+    const seatTop = base + 0.9;
+    g.add(box(w, 0.9, seatD, fab, 0, base, -d / 2 + seatD / 2));                       // back run
+    g.add(box(chW, 0.9, chL - seatD, fab, side * (w / 2 - chW / 2), base, -d / 2 + seatD + (chL - seatD) / 2)); // chaise
+    g.add(box(w, Math.max(h - seatTop, 0.5), backD, fab, 0, seatTop, -d / 2 + backD / 2));
+    if (arm) {
+      g.add(box(arm, armStyle === 'slope' ? 0.6 : 0.85, seatD, fab, -side * (w / 2 - arm / 2), seatTop, -d / 2 + seatD / 2));
+    }
+    const n = Math.max(1, Math.round(num(prm.cushionCount, 3))), runW = w - chW - arm, cw = runW / n;
+    const x0 = side > 0 ? -w / 2 + arm : -w / 2 + chW;
+    for (let i = 0; i < n; i++) g.add(box(cw - 0.06, cushH, seatD - backD - 0.05, cush, x0 + cw * (i + 0.5), seatTop, -d / 2 + backD + (seatD - backD) / 2));
+    g.add(box(chW - 0.06, cushH, chL - backD - 0.05, cush, side * (w / 2 - chW / 2), seatTop, -d / 2 + backD + (chL - backD) / 2));
+  },
+  coffee_table(g, w, d, h, prm) {
+    const top = woodMat(prm), legM = prm.legStyle === 'metal' ? metalMat(prm) : woodMat(prm), t = 0.12;
+    if (prm.shape === 'round' || prm.shape === 'oval') {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, t, 48), top); m.scale.set(w, 1, prm.shape === 'round' ? w : d); m.position.y = h - t / 2; m.castShadow = true; g.add(m);
+      if (prm.legStyle === 'plinth') { const b = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, h - t, 32), top); b.scale.set(w * 0.55, 1, (prm.shape === 'round' ? w : d) * 0.55); b.position.y = (h - t) / 2; g.add(b); }
+      else for (let i = 0; i < 4; i++) { const a = (i * Math.PI) / 2 + Math.PI / 4; g.add(taperedLeg(h - t, legM, Math.cos(a) * w * 0.32, Math.sin(a) * (prm.shape === 'round' ? w : d) * 0.32)); }
+    } else {
+      g.add(box(w, t, d, top, 0, h - t, 0));
+      if (prm.legStyle === 'plinth') g.add(box(w - 0.4, h - t, d - 0.4, top, 0, 0, 0));
+      else templateLegs(g, w, d, { ...prm, legHeightIn: (h - t) * 12 }, legM, 0.22);
+    }
+  },
+  side_table(g, w, d, h, prm) { TEMPLATE_BUILDERS.coffee_table(g, w, prm.shape === 'round' ? w : d, h, { ...prm, legStyle: 'metal' }); },
+  media_console(g, w, d, h, prm) {
+    const wood = woodMat(prm), pull = metalMat(prm);
+    const base = templateLegs(g, w, d, prm, prm.legStyle === 'metal' ? pull : wood, 0.2);
+    g.add(box(w, h - base, d, wood, 0, base, 0));
+    const n = Math.round(num(prm.doorCount, 3));
+    for (let i = 1; i < n; i++) g.add(box(0.03, h - base - 0.2, 0.02, mat('#2a1c12'), -w / 2 + (i * w) / n, base + 0.1, d / 2 + 0.005));
+    for (let i = 0; i < n; i++) g.add(box(0.25, 0.04, 0.04, pull, -w / 2 + ((i + 0.5) * w) / n, base + (h - base) * 0.75, d / 2 + 0.02));
+  },
+  rug(g, w, d, h, prm) {
+    const pattern = prm.pattern ?? 'solid', color = prm.rugColor || '#9a9184';
+    if (pattern === 'solid') { const m = box(w, 0.04, d, mat(color, { roughness: 1 }), 0, 0.003, 0); m.castShadow = false; g.add(m); return; }
+    BUILDERS.rug(g, w, d, h, { color, accentColor: '#3d3a36', ...(pattern === 'border' ? { accent: '#3d3a36' } : {}) });
+  },
+  floor_lamp(g, w, d, h, prm) {
+    const met = metalMat(prm), shadeM = mat(prm.shadeColor || '#efe7d8', { side: THREE.DoubleSide, emissive: '#5a4a30', emissiveIntensity: 0.4 });
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.4, w * 0.45, 0.08, 24), met); base.position.y = 0.04; g.add(base);
+    if (prm.arc === 'true') {
+      const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, h * 1.1, 0), new THREE.Vector3(0, h * 0.85, d / 2 + 2.5));
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, 0.03, 8), met); tube.castShadow = true; g.add(tube);
+      const shade = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), shadeM); shade.position.set(0, h * 0.85 - 0.5, d / 2 + 2.5); g.add(shade);
+    } else BUILDERS.lamp(g, w, d, h, { color: METAL[prm.metalFinish] ?? METAL.brass });
+  },
+  bed(g, w, d, h, prm) {
+    const fab = mat(prm.fabricColor, { roughness: 0.95 }), wood = woodMat(prm);
+    const base = templateLegs(g, w, d, { ...prm, legStyle: 'block' }, wood, 0.2);
+    g.add(box(w, 0.6, d, prm.headboard === 'wood' ? wood : fab, 0, base, 0));
+    g.add(box(w - 0.1, 0.8, d - 0.3, mat('#f3f1ec', { roughness: 1 }), 0, base + 0.6, 0.1));
+    g.add(box(w - 0.1, 0.12, d * 0.62, mat(prm.fabricColor, { roughness: 1 }), 0, base + 1.4, d / 2 - (d * 0.62) / 2));
+    for (const s of [-1, 1]) g.add(box(w / 2 - 0.4, 0.35, 1.2, mat('#ffffff', { roughness: 1 }), s * w / 4, base + 1.4, -d / 2 + 1));
+    if (prm.headboard !== 'none') g.add(box(w + 0.2, Math.max(h - 0.1, 2.5), 0.3, prm.headboard === 'wood' ? wood : fab, 0, 0, -d / 2 - 0.15));
+  },
+  dresser(g, w, d, h, prm) {
+    const wood = woodMat(prm), pull = metalMat(prm);
+    const base = templateLegs(g, w, d, prm, prm.legStyle === 'metal' ? pull : wood, 0.2);
+    g.add(box(w, h - base, d, wood, 0, base, 0));
+    const n = Math.max(1, Math.round(num(prm.drawerCount, 6))), cols = n >= 6 ? 2 : 1, rows = Math.ceil(n / cols), dh = (h - base - 0.1) / rows;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols && r * cols + c < n; c++) {
+      const x = -w / 2 + (c + 0.5) * (w / cols), y = base + 0.05 + r * dh;
+      g.add(box(w / cols - 0.08, 0.02, 0.02, mat('#2a1c12'), x, y + dh - 0.02, d / 2 + 0.005));
+      g.add(box(0.3, 0.04, 0.04, pull, x, y + dh / 2, d / 2 + 0.02));
+    }
+  },
+  nightstand(g, w, d, h, prm) { TEMPLATE_BUILDERS.dresser(g, w, d, h, prm); },
+  desk(g, w, d, h, prm) {
+    const wood = woodMat(prm), legM = prm.legStyle === 'metal' ? metalMat(prm) : wood, t = 0.1;
+    g.add(box(w, t, d, wood, 0, h - t, 0));
+    templateLegs(g, w, d, { ...prm, legHeightIn: (h - t) * 12 }, legM, 0.12);
+    if (prm.drawers !== 'false') g.add(box(w * 0.45, 0.35, d - 0.2, wood, w * 0.2, h - t - 0.35, 0));
+  },
+  bookshelf(g, w, d, h, prm) {
+    const wood = woodMat(prm), t = 0.06;
+    for (const s of [-1, 1]) g.add(box(t, h, d, wood, s * (w / 2 - t / 2), 0, 0));
+    if (prm.backPanel !== 'false') g.add(box(w, h, 0.03, wood, 0, 0, -d / 2 + 0.015));
+    const n = Math.max(1, Math.round(num(prm.shelfCount, 5)));
+    for (let i = 0; i <= n; i++) g.add(box(w - 2 * t, t, d, wood, 0, (i * (h - t)) / n, 0));
+    const colors = ['#7a3b2e', '#2e4a7a', '#c9a227', '#3b6e4a', '#e6e0d4'];
+    for (let i = 0; i < n; i++) for (let k = 0; k < 6; k++) { const bw = (w - 2 * t) / 9; g.add(box(bw * 0.9, ((h - t) / n) * 0.7, d * 0.7, mat(colors[(i + k) % 5]), -w / 2 + t + bw * (k + 0.6), (i * (h - t)) / n + t, 0)); }
+  },
+};
+/** Build a placement's template (params over template defaults). Returns false if unknown. */
+function buildTemplate(g, p, it) {
+  const t = p.template, f = t && TEMPLATE_BUILDERS[t.slug];
+  if (!f) return false;
+  const prm = { ...(TEMPLATE_DEFAULTS.get(t.slug) ?? {}), ...t.params };
+  f(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), prm, it);
+  return true;
+}
+
+// 3D models (Object Capture USDZ or uploaded GLB/USDZ), fetched same-origin, cached per file.
+const modelCache = new Map();
+function loadModel(m) {
+  if (!modelCache.has(m.fileUrl)) {
+    const loader = m.format === 'glb' ? new GLTFLoader() : new USDLoader();
+    modelCache.set(m.fileUrl, loader.loadAsync(m.fileUrl).then((r) => r.scene ?? r));
+  }
+  return modelCache.get(m.fileUrl);
+}
+/** Fit a model into the item's footprint: uniform scale, centered, standing on the floor. */
+function fitModel(obj, it) {
+  const o = obj.clone(true);
+  o.updateMatrixWorld(true);
+  const b = new THREE.Box3().setFromObject(o), size = b.getSize(new THREE.Vector3());
+  if (!isFinite(size.x) || size.x <= 0 || size.z <= 0) throw new Error('empty model');
+  const s = Math.min(ft(it.wIn) / size.x, ft(it.dIn) / size.z, it.hIn > 0 ? ft(it.hIn) / Math.max(size.y, 1e-6) : Infinity);
+  const wrap = new THREE.Group(); wrap.add(o);
+  o.scale.multiplyScalar(s);
+  o.updateMatrixWorld(true);
+  const b2 = new THREE.Box3().setFromObject(o), c = b2.getCenter(new THREE.Vector3());
+  o.position.sub(new THREE.Vector3(c.x, b2.min.y, c.z));
+  o.traverse((x) => { if (x.isMesh) { x.castShadow = true; x.receiveShadow = true; } });
+  return wrap;
+}
+
 export const footprintFt = (p) => {
   const r = ((p.rotationDeg % 360) + 360) % 360, sw = r === 90 || r === 270;
   const w = ft(sw ? p.item.dIn : p.item.wIn), d = ft(sw ? p.item.wIn : p.item.dIn);
@@ -158,7 +347,7 @@ export class RoomView {
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    this.renderer.shadowMap.enabled = true; this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = true; this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
     this.labels = new CSS2DRenderer();
@@ -366,7 +555,7 @@ export class RoomView {
     this.clearGroup(this.furnRoot); this.objects.clear();
     for (const r of this.data?.rooms ?? []) for (const p of r.furniture) {
       const it = p.item, g = new THREE.Group();
-      (BUILDERS[it.kind] || BUILDERS.box)(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), it);
+      if (!buildTemplate(g, p, it)) (BUILDERS[it.kind] || BUILDERS.box)(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), it);
       const ghost = p.action === 'remove';
       g.traverse((o) => {
         o.userData.pid = p.id;
@@ -375,6 +564,19 @@ export class RoomView {
       const div = document.createElement('div');
       div.className = 'lbl' + (this.highlight.has(`placement:${p.id}`) ? ' changed' : '') + (ghost ? ' ghost' : '');
       div.textContent = it.name + (ghost ? ' (remove)' : '');
+      if (p.model) {
+        // The model wins over the template. Until it loads (or if it can't), the template stands in with a badge.
+        const badge = document.createElement('span'); badge.className = 'badge-model'; badge.textContent = 'custom model'; div.appendChild(badge);
+        loadModel(p.model).then((obj) => {
+          if (this.objects.get(p.id) !== g) return; // rebuilt meanwhile
+          const fitted = fitModel(obj, it);
+          for (const c of [...g.children]) if (!c.isCSS2DObject && c !== g.userData.hl) g.remove(c);
+          fitted.traverse((o) => { o.userData.pid = p.id; if (ghost && o.isMesh) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.25; } });
+          g.add(fitted);
+          badge.textContent = '3D model'; badge.classList.add('loaded');
+          if (this.selected === p.id) this.select(p.id);
+        }).catch((err) => { console.warn('model', p.model.fileUrl, err); badge.textContent = 'custom model (showing template)'; badge.classList.add('failed'); });
+      }
       const lbl = new CSS2DObject(div);
       lbl.position.set(0, Math.max(ft(it.hIn), 0.3) + 0.35 + (it.kind === 'tv' ? 2 : 0), it.kind === 'rug' ? ft(it.dIn) / 2 - 1 : 0);
       g.add(lbl); g.userData.labelEl = div;

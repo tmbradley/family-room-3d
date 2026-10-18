@@ -11,7 +11,8 @@ export const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0'
  * @param {{x:number,z:number}} [o.origin] world offset in meters
  * @param {number} [o.floorY=-1.2] floor height in meters relative to the session origin
  * @param {number} [o.heightIn=108]
- * @param {number[][]} o.walls plan walls [ax, az, bx, bz] in inches (x right, z = plan y)
+ * @param {number[][]} o.walls plan walls [ax, az, bx, bz] in inches (x right, z = plan y, seen from above;
+ *   RoomPlan's world is right-handed with y up, so plan y runs along world -Z)
  * @param {{wall:number, offsetIn:number, widthIn:number, heightIn:number, sillIn?:number, n?:number}[]} [o.doors]
  * @param {typeof o.doors} [o.windows]
  * @param {typeof o.doors} [o.openings]
@@ -20,8 +21,9 @@ export const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0'
  */
 export function buildCapturedRoom(o) {
   const phi = ((o.yawDeg ?? 30) * Math.PI) / 180, T = o.origin ?? { x: 1.3, z: -0.4 }, floorY = o.floorY ?? -1.2, H = (o.heightIn ?? 108) * IN;
-  const world = (x, z) => ({ x: x * Math.cos(phi) - z * Math.sin(phi) + T.x, z: x * Math.sin(phi) + z * Math.cos(phi) + T.z });
-  const dirW = (dx, dz) => ({ x: dx * Math.cos(phi) - dz * Math.sin(phi), z: dx * Math.sin(phi) + dz * Math.cos(phi) });
+  // Plan (x, y) -> world (x, -y), then the session's yaw and offset.
+  const world = (x, py) => { const z = -py; return { x: x * Math.cos(phi) - z * Math.sin(phi) + T.x, z: x * Math.sin(phi) + z * Math.cos(phi) + T.z }; };
+  const dirW = (dx, dpy) => { const dz = -dpy; return { x: dx * Math.cos(phi) - dz * Math.sin(phi), z: dx * Math.sin(phi) + dz * Math.cos(phi) }; };
   const transform = (d, p, y) => [d.x, 0, d.z, 0, 0, 1, 0, 0, -d.z, 0, d.x, 0, p.x, y, p.z, 1];
   const base = (id, category) => ({ identifier: id, category, confidence: { high: {} }, completedEdges: [], polygonCorners: [], story: 0, curve: null });
   const wallIds = o.walls.map((_, i) => o.wallIds?.[i] ?? uuid(i + 1));

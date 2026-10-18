@@ -7,64 +7,33 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		2A3E3FA8C238598F25764781 /* HousePlannerClip.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = AA0002B6 /* HousePlannerClip.app */; settings = {ATTRIBUTES = (RemoveHeaderOnCopy, ); }; };
+		1FA288BF040907D3D86BB148 /* MeasureNotesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FA52BD64A58D4F1C4731880 /* MeasureNotesView.swift */; };
+		444FA1ADD6140231A9502556 /* RoomPlanCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 981DD3A5274E4151ADC0D902 /* RoomPlanCapture.swift */; };
+		840DD1801F076E997DDA00B4 /* PlannerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920DFF921E2223578FE1A3A3 /* PlannerClient.swift */; };
+		91E06DA942E3514E286F03ED /* OnDeviceAI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496B7A3829A4F5B31607A062 /* OnDeviceAI.swift */; };
+		95C9D7F20BB6782A8ED1BFC3 /* ScanFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C799F09175699E0E34E149 /* ScanFlow.swift */; };
 		AA0001AA /* HousePlannerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001A9 /* HousePlannerApp.swift */; };
 		AA0001AC /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001AB /* ContentView.swift */; };
 		AA0001AE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0001AD /* Assets.xcassets */; };
-		AA0002BA /* HousePlannerClipApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002B9 /* HousePlannerClipApp.swift */; };
-		AA0002BC /* ScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002BB /* ScanView.swift */; };
-		AA0002BE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0002BD /* Assets.xcassets */; };
-		AA0002C0 /* UploadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002BF /* UploadManager.swift */; };
-		AA0002C2 /* RoomPlanCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002C1 /* RoomPlanCapture.swift */; };
+		FE8BE4FF5DBD5D01E7D1B94E /* ObjectCaptureFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C9C10A0911E5F6E26C538DF /* ObjectCaptureFlow.swift */; };
 /* End PBXBuildFile section */
 
-/* Begin PBXContainerItemProxy section */
-		0E1E3F08531E3989259A0133 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = AA00019E /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = AA0002B5;
-			remoteInfo = HousePlannerClip;
-		};
-/* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		9CF89B6C33CBFEC402CA73AB /* Embed App Clips */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
-			dstSubfolderSpec = 16;
-			files = (
-				2A3E3FA8C238598F25764781 /* HousePlannerClip.app in Embed App Clips */,
-			);
-			name = "Embed App Clips";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
-
 /* Begin PBXFileReference section */
+		14C799F09175699E0E34E149 /* ScanFlow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ScanFlow.swift; sourceTree = "<group>"; };
+		1C9C10A0911E5F6E26C538DF /* ObjectCaptureFlow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ObjectCaptureFlow.swift; sourceTree = "<group>"; };
+		496B7A3829A4F5B31607A062 /* OnDeviceAI.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OnDeviceAI.swift; sourceTree = "<group>"; };
+		4FA52BD64A58D4F1C4731880 /* MeasureNotesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MeasureNotesView.swift; sourceTree = "<group>"; };
+		920DFF921E2223578FE1A3A3 /* PlannerClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlannerClient.swift; sourceTree = "<group>"; };
+		981DD3A5274E4151ADC0D902 /* RoomPlanCapture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RoomPlanCapture.swift; sourceTree = "<group>"; };
 		AA0001A6 /* HousePlanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HousePlanner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0001A9 /* HousePlannerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HousePlannerApp.swift; sourceTree = "<group>"; };
 		AA0001AB /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		AA0001AD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		AA0002B6 /* HousePlannerClip.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HousePlannerClip.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		AA0002B9 /* HousePlannerClipApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HousePlannerClipApp.swift; sourceTree = "<group>"; };
-		AA0002BB /* ScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView.swift; sourceTree = "<group>"; };
-		AA0002BD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		AA0002BF /* UploadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadManager.swift; sourceTree = "<group>"; };
-		AA0002C1 /* RoomPlanCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomPlanCapture.swift; sourceTree = "<group>"; };
-		AA0002C3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E33F91E71CC4ECC61FF0A08B /* HousePlanner.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = HousePlanner.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		AA0001A3 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		AA0002B3 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -78,7 +47,6 @@
 			isa = PBXGroup;
 			children = (
 				AA0001A8 /* HousePlanner */,
-				AA0002B8 /* HousePlannerClip */,
 				AA0001A7 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -87,7 +55,6 @@
 			isa = PBXGroup;
 			children = (
 				AA0001A6 /* HousePlanner.app */,
-				AA0002B6 /* HousePlannerClip.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -98,21 +65,15 @@
 				AA0001A9 /* HousePlannerApp.swift */,
 				AA0001AB /* ContentView.swift */,
 				AA0001AD /* Assets.xcassets */,
+				981DD3A5274E4151ADC0D902 /* RoomPlanCapture.swift */,
+				920DFF921E2223578FE1A3A3 /* PlannerClient.swift */,
+				14C799F09175699E0E34E149 /* ScanFlow.swift */,
+				4FA52BD64A58D4F1C4731880 /* MeasureNotesView.swift */,
+				1C9C10A0911E5F6E26C538DF /* ObjectCaptureFlow.swift */,
+				496B7A3829A4F5B31607A062 /* OnDeviceAI.swift */,
+				E33F91E71CC4ECC61FF0A08B /* HousePlanner.entitlements */,
 			);
 			path = HousePlanner;
-			sourceTree = "<group>";
-		};
-		AA0002B8 /* HousePlannerClip */ = {
-			isa = PBXGroup;
-			children = (
-				AA0002B9 /* HousePlannerClipApp.swift */,
-				AA0002BB /* ScanView.swift */,
-				AA0002BF /* UploadManager.swift */,
-				AA0002C1 /* RoomPlanCapture.swift */,
-				AA0002BD /* Assets.xcassets */,
-				AA0002C3 /* Info.plist */,
-			);
-			path = HousePlannerClip;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -125,34 +86,15 @@
 				AA0001A2 /* Sources */,
 				AA0001A3 /* Frameworks */,
 				AA0001A4 /* Resources */,
-				9CF89B6C33CBFEC402CA73AB /* Embed App Clips */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				33932831ABEBCDCE03B3EAD2 /* PBXTargetDependency */,
 			);
 			name = HousePlanner;
 			productName = HousePlanner;
 			productReference = AA0001A6 /* HousePlanner.app */;
 			productType = "com.apple.product-type.application";
-		};
-		AA0002B5 /* HousePlannerClip */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = AA0002C4 /* Build configuration list for PBXNativeTarget "HousePlannerClip" */;
-			buildPhases = (
-				AA0002B2 /* Sources */,
-				AA0002B3 /* Frameworks */,
-				AA0002B4 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = HousePlannerClip;
-			productName = HousePlannerClip;
-			productReference = AA0002B6 /* HousePlannerClip.app */;
-			productType = "com.apple.product-type.application.on-demand-install-capable";
 		};
 /* End PBXNativeTarget section */
 
@@ -165,9 +107,6 @@
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
 					AA0001A5 = {
-						CreatedOnToolsVersion = 15.0;
-					};
-					AA0002B5 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -185,7 +124,6 @@
 			projectRoot = "";
 			targets = (
 				AA0001A5 /* HousePlanner */,
-				AA0002B5 /* HousePlannerClip */,
 			);
 		};
 /* End PBXProject section */
@@ -199,14 +137,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		AA0002B4 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				AA0002BE /* Assets.xcassets in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -216,30 +146,16 @@
 			files = (
 				AA0001AC /* ContentView.swift in Sources */,
 				AA0001AA /* HousePlannerApp.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		AA0002B2 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				AA0002BC /* ScanView.swift in Sources */,
-				AA0002BA /* HousePlannerClipApp.swift in Sources */,
-				AA0002C0 /* UploadManager.swift in Sources */,
-				AA0002C2 /* RoomPlanCapture.swift in Sources */,
+				444FA1ADD6140231A9502556 /* RoomPlanCapture.swift in Sources */,
+				840DD1801F076E997DDA00B4 /* PlannerClient.swift in Sources */,
+				95C9D7F20BB6782A8ED1BFC3 /* ScanFlow.swift in Sources */,
+				1FA288BF040907D3D86BB148 /* MeasureNotesView.swift in Sources */,
+				FE8BE4FF5DBD5D01E7D1B94E /* ObjectCaptureFlow.swift in Sources */,
+				91E06DA942E3514E286F03ED /* OnDeviceAI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		33932831ABEBCDCE03B3EAD2 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = HousePlannerClip;
-			target = AA0002B5 /* HousePlannerClip */;
-			targetProxy = 0E1E3F08531E3989259A0133 /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA0001B2 /* Debug */ = {
@@ -366,14 +282,18 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HousePlanner/HousePlanner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = Q3HHMS5MLX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "House Planner";
+				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner capture your room's walls, doors and windows, room photos, and 3D models of furniture.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIRequiredDeviceCapabilities = arkit;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -395,14 +315,18 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = HousePlanner/HousePlanner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = Q3HHMS5MLX;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "House Planner";
+				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner capture your room's walls, doors and windows, room photos, and 3D models of furniture.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIRequiredDeviceCapabilities = arkit;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -412,70 +336,6 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.michaelbradley.houseplanner;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
-		AA0002C5 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = HousePlannerClip/HousePlannerClip.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = Q3HHMS5MLX;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = HousePlannerClip/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Scan Room";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.michaelbradley.houseplanner.clip;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		AA0002C6 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = HousePlannerClip/HousePlannerClip.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = Q3HHMS5MLX;
-				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = HousePlannerClip/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Scan Room";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.michaelbradley.houseplanner.clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -500,15 +360,6 @@
 			buildConfigurations = (
 				AA0001B5 /* Debug */,
 				AA0001B6 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		AA0002C4 /* Build configuration list for PBXNativeTarget "HousePlannerClip" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				AA0002C5 /* Debug */,
-				AA0002C6 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

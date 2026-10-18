@@ -10,10 +10,12 @@ import { coerce, def, delegate, fieldSpec, ser, type Tx } from './entities.js';
 import { applyOps, commitRevision, lockWorkspace, type Op } from './changes.js';
 import { copyWorkspace, getWorkspaceView } from './workspaces.js';
 import { prisma } from './db.js';
+import { listPhotos } from './photos.js';
+import { recordMeasurement } from './measurements.js';
 
 export const COST_STEPS = ['paint', 'outlets', 'lighting', 'window', 'furniture', 'rug', 'decor', 'other'] as const;
 
-const entityType = z.enum(['placement', 'furniture_item', 'room', 'wall', 'opening', 'fixture', 'workspace']);
+const entityType = z.enum(['placement', 'placement_param', 'room_style', 'furniture_item', 'room', 'wall', 'opening', 'fixture', 'workspace']);
 export const changeSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('update'), entityType, entityId: z.number().int(), field: z.string(), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }),
   z.object({
@@ -37,6 +39,7 @@ export const proposalShape = {
     imageUrl: z.string().url().max(1000).optional(),
   }),
   changes: z.array(changeSchema).min(1).max(200),
+  photoIds: z.array(z.number().int()).max(20).optional().describe('Room photos this proposal refers to (ids from list_room_photos)'),
   cost: z.object({
     steps: z.array(z.object({
       step: z.enum(COST_STEPS),
@@ -144,6 +147,12 @@ export async function createProposal(input: ProposalInput, by: { actor: Actor; a
   // Dry run: the whole change list must apply cleanly (ownership, refs, pins) before it is stored.
   await dryRun((tx) => applyProposal(tx, { id: 0, targetWorkspaceId: p.workspaceId ?? null, baseWorkspaceId: p.newWorkspace?.copyFromWorkspaceId ?? null, newWorkspaceName: p.newWorkspace?.name ?? null, createdBy: by.actor }, ops, false));
 
+  const photoIds = [...new Set(p.photoIds ?? [])];
+  if (photoIds.length) {
+    const found = await prisma.scanPhoto.count({ where: { id: { in: photoIds } } });
+    if (found !== photoIds.length) throw new ApiError(400, 'photo_not_found', 'One or more photoIds do not exist (see list_room_photos)');
+  }
+
   const cents = (usd: number) => Math.round(usd * 100);
   const created = await prisma.proposal.create({
     data: {
@@ -156,6 +165,52 @@ export async function createProposal(input: ProposalInput, by: { actor: Actor; a
       rooms: { create: p.roomIds.map((roomId) => ({ roomId })) },
       changes: { createMany: { data: rows } },
       costSteps: { create: p.cost.steps.map((s, i) => ({ sort: i, step: s.step, changesText: s.changes, lowCents: cents(s.lowUsd), highCents: cents(s.highUsd) })) },
+      photos: { create: photoIds.map((photoId) => ({ photoId })) },
+    },
+  });
+  return getProposal(created.id);
+}
+
+// ---------------------------------------------------------------------------
+// Measurement proposals (notes from the iPhone). Approving records each value as a "measured"
+// measurement; pins still win. They target Current rooms, which proposals can't otherwise change.
+// ---------------------------------------------------------------------------
+export const suggestionSchema = z.object({
+  entityType: z.enum(['room', 'wall', 'opening']),
+  entityId: z.number().int(),
+  field: z.string().max(40),
+  valueIn: z.number().int().min(1).max(2000),
+  note: z.string().max(300).optional(),
+});
+export type MeasurementSuggestion = z.infer<typeof suggestionSchema>;
+
+export async function createMeasurementProposal(p: { roomId: number; notes: string; suggestions: MeasurementSuggestion[]; method: string }) {
+  const suggestions = z.array(suggestionSchema).min(1).max(30).parse(p.suggestions);
+  const room = await prisma.room.findUnique({ where: { id: p.roomId }, include: { walls: { include: { openings: true } } } });
+  if (!room) throw new ApiError(404, 'room_not_found', `Room ${p.roomId} not found`);
+  const rows: { seq: number; entityType: string; entityId: number; field: string; valueIn: number; beforeIn: number | null; note: string | null }[] = [];
+  const seen = new Set<string>();
+  for (const s of suggestions) {
+    if (!def(s.entityType).pinnable.includes(s.field)) throw new ApiError(400, 'not_measurable', `${s.entityType}.${s.field} isn't a measurement. Measurable: ${def(s.entityType).pinnable.join(', ')}`);
+    const row: any = s.entityType === 'room' ? (s.entityId === room.id ? room : null)
+      : s.entityType === 'wall' ? room.walls.find((w) => w.id === s.entityId)
+      : room.walls.flatMap((w) => w.openings).find((o) => o.id === s.entityId);
+    if (!row) throw new ApiError(400, 'not_in_room', `${s.entityType} ${s.entityId} isn't part of ${room.label}`);
+    const k = `${s.entityType}:${s.entityId}:${s.field}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    rows.push({ seq: rows.length, entityType: s.entityType, entityId: s.entityId, field: s.field, valueIn: s.valueIn, beforeIn: row[s.field] ?? null, note: s.note?.slice(0, 500) ?? null });
+  }
+  const notes = p.notes.trim().slice(0, 4000);
+  const created = await prisma.proposal.create({
+    data: {
+      houseId: room.houseId, createdBy: 'michael', kind: 'measurements', sourceKind: 'manual',
+      title: `Measurements from notes: ${room.label}`.slice(0, 200),
+      rationale: `${notes}\n\n(Parsed on the iPhone by ${p.method === 'on_device_model' ? "Apple's on-device model" : p.method === 'keywords' ? 'keyword matching' : 'hand entry'}. Check each value before approving.)`,
+      baseRevision: 0, costLowCents: 0, costHighCents: 0,
+      rooms: { create: [{ roomId: room.id }] },
+      measurements: { createMany: { data: rows } },
+      costSteps: { create: [{ sort: 0, step: 'other', changesText: 'Record measurements (nothing to buy)', lowCents: 0, highCents: 0 }] },
     },
   });
   return getProposal(created.id);
@@ -170,6 +225,8 @@ async function labelFor(entityType: string, id: number | null): Promise<string |
     case 'opening': return (await prisma.opening.findUnique({ where: { id } }))?.label ?? null;
     case 'fixture': return (await prisma.fixture.findUnique({ where: { id } }))?.name ?? null;
     case 'room': return (await prisma.room.findUnique({ where: { id } }))?.label ?? null;
+    case 'placement_param': { const pp = await prisma.placementParam.findUnique({ where: { id }, include: { placement: { include: { item: true } } } }); return pp ? `${pp.placement.item.name} · ${pp.key}` : null; }
+    case 'room_style': { const st = await prisma.roomStyle.findUnique({ where: { id }, include: { room: true } }); return st ? `${st.room.label} colors` : null; }
     case 'workspace': return (await prisma.workspace.findUnique({ where: { id } }))?.name ?? null;
   }
   return null;
@@ -183,27 +240,36 @@ export async function getProposal(id: number) {
       rooms: { include: { room: { select: { id: true, label: true } } } },
       targetWorkspace: { select: { id: true, name: true } }, baseWorkspace: { select: { id: true, name: true } },
       agentKey: { select: { name: true } }, revisions: { select: { number: true, workspaceId: true } },
+      measurements: { orderBy: { seq: 'asc' } }, photos: { select: { photoId: true } },
     },
   });
   if (!p) throw new ApiError(404, 'proposal_not_found', `Proposal ${id} not found`);
+  const photos = p.photos.length ? await listPhotos({ ids: p.photos.map((x) => x.photoId) }) : [];
   const ops = opsFromRows(p.changes);
   const diff = await Promise.all(ops.map(async (o) => {
     if (o.op === 'update') return { op: o.op, entityType: o.entityType, entityId: o.entityId, label: await labelFor(o.entityType, o.entityId), field: o.field, before: o.before ?? null, after: o.after as string | null };
     if (o.op === 'delete') return { op: o.op, entityType: o.entityType, entityId: o.entityId, label: await labelFor(o.entityType, o.entityId) };
     return { op: o.op, entityType: o.entityType, tempRef: o.tempRef, label: (o.fields.name as string) ?? null, fields: o.fields };
   }));
+  const measurementRows = await Promise.all(p.measurements.map(async (m) => ({
+    op: 'measure' as const, entityType: m.entityType, entityId: m.entityId, label: await labelFor(m.entityType, m.entityId),
+    field: m.field, before: m.beforeIn == null ? null : String(m.beforeIn), after: String(m.valueIn), note: m.note,
+  })));
   const usd = (c: number | null) => (c == null ? null : c / 100);
   return {
+    kind: p.kind,
     id: p.id, title: p.title, status: p.status, createdAt: p.createdAt, createdBy: p.createdBy, agent: p.agentKey?.name ?? null,
     source: { kind: p.sourceKind, url: p.sourceUrl, imageUrl: p.sourceImageUrl },
-    target: p.newWorkspaceName && (p.targetWorkspaceId == null || p.status === 'approved')
+    target: p.kind === 'measurements' ? { kind: 'current' as const, workspace: null }
+      : p.newWorkspaceName && (p.targetWorkspaceId == null || p.status === 'approved')
       ? { kind: 'new_workspace' as const, name: p.newWorkspaceName, copyFrom: p.baseWorkspace, createdWorkspace: p.status === 'approved' ? p.targetWorkspace : null }
       : { kind: 'workspace' as const, workspace: p.targetWorkspace },
     rooms: p.rooms.map((r) => r.room),
     rationale: p.rationale,
     cost: { lowUsd: usd(p.costLowCents), highUsd: usd(p.costHighCents), steps: p.costSteps.map((s) => ({ step: s.step, changes: s.changesText, lowUsd: s.lowCents / 100, highUsd: s.highCents / 100 })) },
     baseRevision: p.baseRevision,
-    changes: diff,
+    changes: p.kind === 'measurements' ? measurementRows : diff,
+    photos,
     decidedAt: p.decidedAt, decisionNote: p.decisionNote,
     appliedRevision: p.revisions[0] ?? null,
   };
@@ -224,6 +290,7 @@ export async function listProposals(filter: { status?: 'pending' | 'approved' | 
 export async function previewProposal(id: number) {
   const p = await prisma.proposal.findUnique({ where: { id }, include: { changes: true } });
   if (!p) throw new ApiError(404, 'proposal_not_found', `Proposal ${id} not found`);
+  if (p.kind === 'measurements') throw new ApiError(400, 'no_preview', 'Measurement proposals have no 3D preview; the values are listed on the card');
   return dryRun(async (tx) => {
     const r = await applyProposal(tx, p, opsFromRows(p.changes), false);
     const view = await getWorkspaceView(tx, r.workspaceId);
@@ -237,6 +304,19 @@ export async function approveProposal(id: number, note?: string) {
     const p = await tx.proposal.findUnique({ where: { id }, include: { changes: true } });
     if (!p) throw new ApiError(404, 'proposal_not_found', `Proposal ${id} not found`);
     if (p.status !== 'pending') throw new ApiError(409, 'not_pending', `Proposal ${id} is already ${p.status}`);
+    if (p.kind === 'measurements') {
+      const ms = await tx.proposalMeasurement.findMany({ where: { proposalId: id }, orderBy: { seq: 'asc' } });
+      const results = [];
+      for (const m of ms) {
+        const r = await recordMeasurement(tx, {
+          workspaceId: await measurementScope(tx, m.entityType, m.entityId), entityType: m.entityType, entityId: m.entityId, field: m.field,
+          valueIn: m.valueIn, source: 'measured', actor: 'michael', note: `Proposal #${id}${m.note ? `: ${m.note}` : ''}`,
+        });
+        results.push({ entityType: m.entityType, entityId: m.entityId, field: m.field, valueIn: m.valueIn, applied: r.applied, pinned: r.pinned, revision: r.revision });
+      }
+      await tx.proposal.update({ where: { id }, data: { status: 'approved', decidedAt: new Date(), decisionNote: note?.slice(0, 1000) } });
+      return { proposalId: id, workspaceId: null, revision: results.reduce<number | null>((a, r) => r.revision ?? a, null), measurements: results };
+    }
     const r = await applyProposal(tx, p, opsFromRows(p.changes), true);
     const rev = await commitRevision(tx, {
       workspaceId: r.workspaceId, kind: 'proposal', actor: p.createdBy, agentKeyId: p.agentKeyId, proposalId: p.id, changes: r.changes,
@@ -253,4 +333,12 @@ export async function rejectProposal(id: number, note?: string) {
   if (p.status !== 'pending') throw new ApiError(409, 'not_pending', `Proposal ${id} is already ${p.status}`);
   await prisma.proposal.update({ where: { id }, data: { status: 'rejected', decidedAt: new Date(), decisionNote: note?.slice(0, 1000) } });
   return { proposalId: id, status: 'rejected' as const };
+}
+
+/** Which scope owns a structure entity: null for Current, or the draft room's workspace. */
+async function measurementScope(tx: Tx, entityType: string, entityId: number): Promise<number | null> {
+  const roomId = entityType === 'room' ? entityId
+    : entityType === 'wall' ? (await tx.wall.findUniqueOrThrow({ where: { id: entityId } })).roomId
+    : (await tx.wall.findUniqueOrThrow({ where: { id: (await tx.opening.findUniqueOrThrow({ where: { id: entityId } })).wallId } })).roomId;
+  return (await tx.room.findUniqueOrThrow({ where: { id: roomId } })).draftWorkspaceId;
 }

@@ -8,8 +8,8 @@
 <link rel="stylesheet" href="style.css">
 <script type="importmap">
 { "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
 } }
 </script>
 </head>
@@ -42,12 +42,19 @@
         <button id="btnRotate" disabled>Rotate 90° (R)</button>
         <button id="btnDelete" class="danger" disabled>Delete</button>
       </div>
+      <div id="tplPanel" hidden></div>
       <label id="actionRow" hidden>In this design
         <select id="actionSel">
           <option value="existing">existing (as is)</option><option value="keep">keep</option>
           <option value="replace">replace</option><option value="remove">remove</option><option value="new">new</option>
         </select>
       </label>
+    </section>
+
+    <section id="photoSection" hidden>
+      <h2>Room photos &amp; colors</h2>
+      <div id="roomStyle" class="small"></div>
+      <div id="photoStrip" class="photo-strip"></div>
     </section>
 
     <section>
@@ -79,7 +86,7 @@
     <section>
       <h2>Scanning</h2>
       <button id="btnPairPhone">Pair phone</button>
-      <p class="muted small">Scan a room with the iPhone App Clip. Scans wait here for review before they change Current.</p>
+      <p class="muted small">Scan a room with the House Planner iPhone app (RoomPlan + guided photos). Scans wait here for review before they change Current.</p>
       <div id="scanImports" class="small"></div>
     </section>
 

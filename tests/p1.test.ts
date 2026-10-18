@@ -255,7 +255,7 @@ test('MCP: auth, tool list by scope, create_proposal leaves it pending', async (
   const init = await mcp(PROPOSE_KEY, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } });
   assert.equal(init.body.result.serverInfo.name, 'house-planner');
   const tools = (await mcp(PROPOSE_KEY, 'tools/list')).body.result.tools.map((t: any) => t.name).sort();
-  assert.deepEqual(tools, ['create_proposal', 'get_history', 'get_room', 'get_workspace', 'list_proposals', 'list_workspaces']);
+  assert.deepEqual(tools, ['create_proposal', 'get_history', 'get_room', 'get_scan_import', 'get_workspace', 'list_models', 'list_proposals', 'list_room_photos', 'list_templates', 'list_workspaces', 'propose_attach_model', 'propose_colors', 'propose_furniture_template']);
   const readTools = (await mcp(READ_KEY, 'tools/list')).body.result.tools.map((t: any) => t.name);
   assert.ok(!readTools.includes('create_proposal'));
   const res = await mcp(PROPOSE_KEY, 'tools/call', {

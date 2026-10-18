@@ -35,7 +35,7 @@ Where this is headed: [PLAN.md](PLAN.md).
   - `workspaces.ts` views and copies, `proposals.ts` proposals, `measurements.ts` measurements and pins
   - `mcp.ts` MCP server at `/mcp`; `house.ts`, `export.ts`, `seed.ts`, `bootstrap.ts`
   - `uploads.ts` phone pairing codes and presigned uploads, `scans.ts` RoomPlan parser, scan review and promote to Current
-- `ios/`: parent app + "Scan Room" App Clip (RoomPlan); build on a Mac, see `ios/README.md` and `SCAN_SETUP.md`
+- `ios/`: the House Planner iPhone app (RoomPlan scan + guided photos, Object Capture, on-device text); build in Xcode, TestFlight; see `ios/README.md` and `SCAN_SETUP.md`
 - `fixtures/`: RoomPlan `CapturedRoom` sample + generator used by the tests
 - `prisma/`: fully relational MySQL schema and migrations
 - `scripts/`: `predeploy.ts` (runs on every start: table snapshot to the bucket, then `prisma migrate deploy`),
@@ -48,9 +48,11 @@ Where this is headed: [PLAN.md](PLAN.md).
 `GET /api/rooms/:id` · `GET /api/proposals[?status=]` · `GET /api/proposals/:id[/preview]` · `POST /api/proposals` (propose scope) ·
 Michael only: `POST /api/workspaces`, `/api/workspaces/:id/changes`, `/api/workspaces/:id/rollback`,
 `/api/proposals/:id/approve|reject`, `/api/measurements`, `/api/measurements/unpin`,
-`/api/upload-tokens` (pair phone), `/api/scans/:id/promote|reject`, `/api/current/rollback`.
-Read: `GET /api/scans[/:id]`, `GET /api/current/history`. Pairing code only (App Clip): `/api/upload-tokens/validate`,
-`/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`. Current changes only through promoted scans,
+`/api/upload-tokens` (pair phone; `{placementId}` for Capture this piece), `/api/scans/:id/promote|reject|furnish`,
+`/api/current/rollback`, `/api/rooms/:id/fix-mirror`, `POST /api/models`, `/api/placements/:id/model`.
+Read: `GET /api/scans[/:id]`, `GET /api/current/history`, `GET /api/photos?roomId=|scanImportId=` (signed URLs, 10 min),
+`GET /api/templates`, `GET /api/models/:id[/file]`. Pairing code only (iPhone app): `/api/upload-tokens/validate|room`,
+`/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`, `/api/models/import`, `/api/suggestions`. Current changes only through promoted scans,
 measurements and rollbacks.
 MCP: `POST /mcp` (see PLAN.md section 10).
 

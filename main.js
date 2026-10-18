@@ -1,7 +1,7 @@
 // House planner editor: workspaces as tabs, split view with synced cameras, proposals, history,
 // measurements. All data comes from and goes to the API; every edit is a revision.
 import { CATALOG } from './catalog.js';
-import { RoomView, escapeHtml as esc, footprintFt } from './scene.js';
+import { RoomView, escapeHtml as esc, footprintFt, setTemplates } from './scene.js';
 import { api, ApiError } from './api.js';
 
 const $ = (id) => document.getElementById(id);
@@ -13,7 +13,7 @@ const savePrefs = () => localStorage.setItem(LS.prefs, JSON.stringify(prefs));
 const state = {
   me: null, editable: false, house: null, workspaces: [], cache: new Map(), previews: new Map(),
   openTabs: JSON.parse(localStorage.getItem(LS.tabs) || 'null'), panes: [], focused: 0,
-  drawer: null, proposals: [], selection: null, scans: [], scanPreviews: new Map(), scanReview: null,
+  drawer: null, proposals: [], selection: null, scans: [], scanPreviews: new Map(), scanReview: null, templates: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ function focusPane(i) {
   if (i < 0 || i === state.focused) return;
   state.focused = i;
   state.panes.forEach((p, j) => p.el.classList.toggle('focused', j === i && state.panes.length > 1));
-  state.selection = null; renderSelection(); renderTabs();
+  state.selection = null; renderSelection(); renderTabs(); renderRoomPhotos();
   if (state.drawer === 'history') renderHistory();
 }
 
@@ -117,7 +117,7 @@ async function show(i, key) {
     tools.appendChild(x);
   }
   renderTabs();
-  if (i === state.focused) { state.selection = null; renderSelection(); }
+  if (i === state.focused) { const sel = pane.view.selected; state.selection = sel != null ? pane.view.placement(sel) : null; renderSelection(); renderRoomPhotos(); }
 }
 
 async function rerenderWs(wsId) {
@@ -285,6 +285,7 @@ function renderSelection() {
   const editable = state.editable && keyWs(pane?.key) != null;
   $('btnRotate').disabled = $('btnDelete').disabled = !p || !editable;
   $('actionRow').hidden = !p || !editable;
+  renderTemplatePanel(p, editable);
   if (!p) { $('selInfo').innerHTML = 'Tap a piece to select it. Drag to move.'; renderMeasurements(); return; }
   const f = footprintFt(p);
   $('selInfo').innerHTML = `<b>${esc(p.item.name)}</b><br>${fmtIn(p.item.wIn)} W × ${fmtIn(p.item.dIn)} D × ${fmtIn(p.item.hIn)} H<br>
@@ -348,6 +349,94 @@ async function measure(btn) {
   } catch (e) { toast(errMsg(e), true); }
 }
 
+
+// ---------------------------------------------------------------------------
+// Templates and 3D models for the selected piece
+// ---------------------------------------------------------------------------
+function renderTemplatePanel(p, editable) {
+  const el = $('tplPanel');
+  if (!p) { el.hidden = true; el.innerHTML = ''; return; }
+  el.hidden = false;
+  const t = p.template ? state.templates.find((x) => x.slug === p.template.slug) : null;
+  const vals = { ...(t ? Object.fromEntries(t.params.map((q) => [q.key, q.default])) : {}), ...(p.template?.params ?? {}) };
+  const dis = editable ? '' : 'disabled';
+  const input = (q) => {
+    const v = vals[q.key];
+    if (q.type === 'choice') return `<select data-k="${esc(q.key)}" ${dis}>${q.options.map((o) => `<option value="${esc(o.value)}" ${o.value === v ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>`;
+    if (q.type === 'color') return `<input type="color" data-k="${esc(q.key)}" value="${esc(v)}" ${dis}>`;
+    if (q.type === 'boolean') return `<input type="checkbox" data-k="${esc(q.key)}" ${v === 'true' ? 'checked' : ''} ${dis}>`;
+    return `<input type="number" data-k="${esc(q.key)}" value="${esc(v)}" min="${q.min}" max="${q.max}" step="1" ${dis}>`;
+  };
+  const m = p.model;
+  el.innerHTML = `<label class="prm"><span>Template</span><select id="tplSel" ${dis}><option value="">(basic shape)</option>${state.templates.map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.template?.slug ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+    ${t ? t.params.map((q) => `<label class="prm"><span>${esc(q.label)}</span>${input(q)}</label>`).join('') : ''}
+    <div class="model">${m ? `<b>3D model:</b> ${esc(m.label)} <span class="muted">(${esc(m.format)}, ${m.source === 'object_capture' ? 'captured on iPhone' : 'uploaded'}, ${Math.round((m.bytes ?? 0) / 1024)} KB)</span><br><span class="muted">The model is drawn instead of the template.</span>` : '<span class="muted">No 3D model. The template is drawn.</span>'}
+      ${editable ? `<div class="row"><button id="btnCapture" title="Pair the iPhone app to capture this piece with Object Capture">Capture this piece</button><button id="btnModelFile">Upload model…</button>${m ? '<button id="btnModelOff" class="danger">Remove model</button>' : ''}</div><input type="file" id="modelFile" accept=".usdz,.glb,model/vnd.usdz+zip,model/gltf-binary" hidden>` : ''}
+    </div>`;
+  if (!editable) return;
+  const wsId = focusedWs();
+  $('tplSel').onchange = (e) => setTemplate(wsId, p, e.target.value);
+  el.querySelectorAll('[data-k]').forEach((inp) => (inp.onchange = () => setParam(wsId, p, inp.dataset.k, inp.type === 'checkbox' ? String(inp.checked) : inp.value)));
+  $('btnCapture').onclick = () => showCaptureDialog(p);
+  $('btnModelFile').onclick = () => $('modelFile').click();
+  $('modelFile').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!/\.(usdz|glb)$/i.test(f.name)) return toast('Choose a .usdz or .glb file', true);
+    try { $('saveStatus').textContent = 'Uploading model…'; await api.uploadModel(f, { label: f.name.replace(/\.[^.]+$/, ''), placementId: p.id }); toast('Model attached'); await rerenderWs(wsId); }
+    catch (err) { toast(`Upload failed: ${errMsg(err)}`, true); }
+  };
+  if (m) $('btnModelOff').onclick = async () => { try { await api.setModel(p.id, null); toast('Model removed; the template is drawn again'); await rerenderWs(wsId); } catch (err) { toast(errMsg(err), true); } };
+}
+function setTemplate(wsId, p, slug) {
+  const t = state.templates.find((x) => x.slug === slug);
+  const changes = [{ op: 'update', entityType: 'placement', entityId: p.id, field: 'templateId', value: t ? t.id : null }];
+  // Parameters belong to a template: drop the ones the new template doesn't have.
+  for (const [key, id] of Object.entries(p.template?.paramIds ?? {})) if (!t || !t.params.some((q) => q.key === key)) changes.push({ op: 'delete', entityType: 'placement_param', entityId: id });
+  saveOps(wsId, changes, t ? `${p.item.name}: ${t.name} template` : `${p.item.name}: basic shape`);
+}
+function setParam(wsId, p, key, value) {
+  const id = p.template?.paramIds?.[key];
+  const label = state.templates.find((x) => x.slug === p.template?.slug)?.params.find((q) => q.key === key)?.label ?? key;
+  saveOps(wsId, [id ? { op: 'update', entityType: 'placement_param', entityId: id, field: 'value', value } : { op: 'create', entityType: 'placement_param', fields: { placementId: p.id, key, value } }], `${p.item.name}: ${label}`);
+}
+async function showCaptureDialog(p) {
+  let r;
+  try { r = await api.pairPhone({ placementId: p.id }); } catch (e) { return toast(errMsg(e), true); }
+  const url = `${location.origin}/scan?token=${encodeURIComponent(r.token)}`;
+  const svg = await qrSvg(url);
+  modal(`<h2>Capture “${esc(p.item.name)}”</h2>
+    <p class="small">On a LiDAR iPhone (iOS 17+): scan the code with the Camera to open House Planner, or type it in the app, then walk around the piece. The model is processed on the phone and attached to this piece (one revision you can roll back).</p>
+    ${svg ? `<div style="text-align:center">${svg}</div>` : ''}
+    <div class="code-box">${esc(r.token)}</div>
+    <p class="small">Expires ${when(r.expiresAt)}</p>
+    <div class="row"><button data-close>Done</button></div>`);
+}
+
+// ---------------------------------------------------------------------------
+// Room photos (signed URLs, valid ~10 minutes) and colors
+// ---------------------------------------------------------------------------
+let photoReq = 0;
+async function renderRoomPhotos() {
+  const sec = $('photoSection'), data = state.panes[state.focused]?.data, n = ++photoReq;
+  const rooms = data?.rooms ?? [];
+  if (!rooms.length || keySc(state.panes[state.focused]?.key) != null) { sec.hidden = true; return; }
+  const sw = (c) => (c?.color ? `<span class="swatch" style="background:${esc(c.color)}"></span>${esc(c.name ?? c.color)}` : c?.name ? esc(c.name) : '—');
+  $('roomStyle').innerHTML = rooms.map((r) => `<div><b>${esc(r.label)}</b>: walls ${sw(r.wallColor)} · trim ${sw(r.trimColor)} · floor ${sw({ color: r.floor?.color, name: r.floor?.colorName })} · outlets/switches ${sw(r.deviceColor)}</div>
+    ${r.mirrored ? `<div class="mirror-banner">This room came from an older scan and is drawn as a <b>mirror image</b>. ${state.editable ? `<button data-mirror="${r.id}">Fix mirror image</button>` : 'Michael can fix it.'}</div>` : ''}`).join('');
+  $('roomStyle').querySelectorAll('button[data-mirror]').forEach((b) => (b.onclick = () => fixMirror(Number(b.dataset.mirror))));
+  sec.hidden = false;
+  let photos = [];
+  try { photos = (await Promise.all(rooms.map((r) => api.photos({ roomId: r.id })))).flat(); } catch { /* reader without photos */ }
+  if (n !== photoReq) return;
+  $('photoStrip').innerHTML = photos.length ? photos.map(photoThumb).join('') : '<span class="muted small">No photos for this room yet.</span>';
+}
+const photoThumb = (ph) => `<a href="${esc(ph.url)}" target="_blank" rel="noopener" title="${esc([ph.prompt, ph.note, ph.tags.join(', ')].filter(Boolean).join(' · '))}"><img src="${esc(ph.url)}" alt="${esc(ph.prompt ?? 'Room photo')}" loading="lazy"></a>`;
+async function fixMirror(roomId) {
+  if (!confirm('Flip this room back to the right way round?\n\nOlder scans were parsed as a mirror image. This flips its walls (one Current revision you can roll back).')) return;
+  try { const r = await api.fixMirror(roomId); toast(`Fixed. Current revision ${r.revision}.`); await refreshHouse(); renderRoomPhotos(); }
+  catch (e) { toast(errMsg(e), true); }
+}
+
 // ---------------------------------------------------------------------------
 // Drawer: proposals and history
 // ---------------------------------------------------------------------------
@@ -364,6 +453,7 @@ function openDrawer(kind, scanId) {
   window.dispatchEvent(new Event('resize'));
 }
 function diffRow(c) {
+  if (c.op === 'measure') return `<tr><td>${esc(c.entityType)} ${esc(c.label ?? '')} <span class="meta">#${c.entityId}</span><br><span class="meta">${esc(c.field)}${c.note ? ` · ${esc(c.note)}` : ''}</span></td><td><span class="before">${esc(fmtVal(c.field, c.before))}</span> → <span class="after">${esc(fmtVal(c.field, c.after))}</span></td></tr>`;
   const what = `${esc(c.entityType.replace('_', ' '))} ${esc(c.label ?? '')}${c.entityId ? ` <span class="meta">#${c.entityId}</span>` : ''}`;
   if (c.op === 'update') return `<tr><td>${what}<br><span class="meta">${esc(c.field)}</span></td><td><span class="before">${esc(fmtVal(c.field, c.before))}</span> → <span class="after">${esc(fmtVal(c.field, c.after))}</span></td></tr>`;
   if (c.op === 'delete') return `<tr><td>${what}</td><td><span class="before">delete</span></td></tr>`;
@@ -371,7 +461,7 @@ function diffRow(c) {
   return `<tr><td>new ${esc(c.entityType.replace('_', ' '))} ${esc(c.label ?? '')}</td><td><span class="after">${f}</span></td></tr>`;
 }
 function proposalCard(p) {
-  const target = p.target.kind === 'new_workspace'
+  const target = p.target.kind === 'current' ? 'Current (measurements)' : p.target.kind === 'new_workspace'
     ? `New workspace “${esc(p.target.name)}” (copy of ${esc(p.target.copyFrom?.name ?? '?')})${p.target.createdWorkspace ? ` → created #${p.target.createdWorkspace.id}` : ''}`
     : esc(p.target.workspace?.name ?? 'deleted workspace');
   const src = p.source.url ? `<a href="${esc(p.source.url)}" target="_blank" rel="noopener">${esc(p.source.kind.replace('_', ' '))}</a>` : esc(p.source.kind.replace('_', ' '));
@@ -382,12 +472,13 @@ function proposalCard(p) {
     <h3>${esc(p.title)}</h3>
     <div class="meta">Target: ${target} · Room: ${p.rooms.map((r) => esc(r.label)).join(', ')}</div>
     <p>${esc(p.rationale)}</p>
-    <b>Changes</b><table class="diff">${p.changes.map(diffRow).join('')}</table>
+    <b>${p.kind === 'measurements' ? 'Measurements to record' : 'Changes'}</b><table class="diff">${p.changes.map(diffRow).join('')}</table>
+    ${p.photos?.length ? `<div class="photo-strip">${p.photos.map(photoThumb).join('')}</div>` : ''}
     <b>Cost to change: ${usd(p.cost.lowUsd)}–${usd(p.cost.highUsd)}</b>
     <table class="cost"><tr><th>Step</th><th>What changes</th><th class="num">Low–high</th></tr>${steps}</table>
     ${p.decidedAt ? `<div class="meta">Decided ${when(p.decidedAt)}${p.decisionNote ? `: ${esc(p.decisionNote)}` : ''}${p.appliedRevision ? ` · applied as revision ${p.appliedRevision.number}` : ''}</div>` : ''}
     <div class="actions">
-      ${p.status === 'pending' ? `<button data-act="preview">Preview side by side</button>` : ''}
+      ${p.status === 'pending' && p.kind !== 'measurements' ? `<button data-act="preview">Preview side by side</button>` : ''}
       ${can ? `<button data-act="approve" class="approve">Approve</button><button data-act="reject" class="danger">Reject</button>` : ''}
     </div>
   </div>`;
@@ -417,9 +508,12 @@ async function proposalAction(id, act) {
     if (act === 'approve') {
       if (!confirm(`Approve “${p.title}”?\n\nThis applies ${p.changes.length} change(s) as a new revision. You can roll it back from History.`)) return;
       const r = await api.approve(id);
-      toast(`Approved. Applied as revision ${r.revision} of ${wsName(r.workspaceId) || 'the new workspace'}.`);
       state.previews.delete(id);
-      await refreshList(); await openTab(r.workspaceId, 0); await rerenderWs(r.workspaceId);
+      if (r.workspaceId == null) { toast(`Approved. Recorded ${r.measurements?.length ?? 0} measurement(s) in Current.`); await refreshHouse(); }
+      else {
+        toast(`Approved. Applied as revision ${r.revision} of ${wsName(r.workspaceId) || 'the new workspace'}.`);
+        await refreshList(); await openTab(r.workspaceId, 0); await rerenderWs(r.workspaceId);
+      }
       if (state.panes.length > 1 && keyPv(state.panes[1].key) === id) setSplit(false);
     } else {
       const note = prompt(`Reject “${p.title}”? Optional reason:`, '');
@@ -539,6 +633,7 @@ async function boot() {
   document.body.classList.toggle('readonly', !state.editable);
   $('whoami').textContent = state.editable ? 'Signed in as Michael · edits save as revisions' : `Read-only (agent key, ${state.me.scope} scope)`;
   state.house = await api.house();
+  try { state.templates = await api.templates(); setTemplates(state.templates); } catch { /* older server */ }
   $('houseStatus').hidden = !!state.house.hasCurrent;
   if (!state.house.hasCurrent) $('houseStatus').innerHTML = '<strong>No Current yet.</strong> Create one from a scan or confirmed measurements. Until then, designs live in workspaces like the Test room.';
   await refreshList();
@@ -586,7 +681,7 @@ function showPairDialog() {
   if (!state.editable) return toast('Only Michael can pair a phone (sign in with your passkey)', true);
   const rooms = state.house?.current?.rooms ?? [];
   const m = modal(`<h2>Pair phone</h2>
-    <p class="small">The code works for one scan, from one phone, for 60 minutes. The scan waits here for your review; nothing changes Current until you promote it.</p>
+    <p class="small">The code works for one scan (plus its photos), from one phone, for 60 minutes. The scan waits here for your review; nothing changes Current until you promote it.</p>
     <label>What are you scanning?
       <select id="pairScope">
         <option value="new">A new room</option>
@@ -604,7 +699,7 @@ function showPairDialog() {
     const url = `${location.origin}/scan?token=${encodeURIComponent(r.token)}`;
     const svg = await qrSvg(url);
     m.querySelector('.modal-content').innerHTML = `<h2>Scan with your iPhone</h2>
-      <p class="small">Point the iPhone camera at the code to open the Scan Room App Clip, or type the code in the clip.</p>
+      <p class="small">Point the iPhone Camera at the code to open House Planner, or type the code in the app. Take the guided photos before you send the scan.</p>
       ${svg ? `<div style="text-align:center">${svg}</div>` : ''}
       <div class="code-box">${esc(r.token)}</div>
       <p class="small">Scanning: <b>${esc(r.roomLabel)}</b> · expires ${when(r.expiresAt)}<br><a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></p>
@@ -613,12 +708,15 @@ function showPairDialog() {
 }
 async function refreshScans() {
   const el = $('scanImports');
-  try { state.scans = await api.scans('pending'); } catch (e) { el.innerHTML = `<div class="muted">${esc(errMsg(e))}</div>`; return; }
-  el.innerHTML = state.scans.length
-    ? state.scans.map((s) => `<div class="scan-item"><strong>${esc(s.label)}</strong>
-        <span class="muted">${s.room ? `Rescan of ${esc(s.room.label)}` : 'New room'} · ${when(s.createdAt)} · ${s.files} file(s)</span>
-        <div class="row"><button data-scan="${s.id}">Review</button></div></div>`).join('')
-    : '<div class="muted">No scans waiting for review.</div>';
+  let done = [];
+  try { state.scans = await api.scans('pending'); done = (await api.scans('promoted')).slice(0, 5); } catch (e) { el.innerHTML = `<div class="muted">${esc(errMsg(e))}</div>`; return; }
+  const item = (s, label) => `<div class="scan-item"><strong>${esc(s.label)}</strong>
+        <span class="muted">${label} · ${when(s.createdAt)} · ${s.files} file(s)</span>
+        <div class="row"><button data-scan="${s.id}">${s.status === 'pending' ? 'Review' : 'Open'}</button></div></div>`;
+  el.innerHTML = (state.scans.length
+    ? state.scans.map((s) => item(s, s.room ? `Rescan of ${esc(s.room.label)}` : 'New room')).join('')
+    : '<div class="muted">No scans waiting for review.</div>')
+    + (done.length ? `<div class="muted" style="margin-top:6px">Promoted</div>${done.map((s) => item(s, `#${s.id} in ${esc(s.room?.label ?? '?')}`)).join('')}` : '');
   el.querySelectorAll('button[data-scan]').forEach((b) => (b.onclick = () => reviewScan(Number(b.dataset.scan))));
 }
 async function reviewScan(id) {
@@ -635,19 +733,33 @@ function renderScanReview(id) {
   if (!scan) { body.innerHTML = '<p class="muted">Scan not loaded.</p>'; return; }
   const s = scan.parsed;
   const can = state.editable && scan.status === 'pending';
+  const objRows = s.objects.map((o) => `<tr><td>${esc(o.label ?? o.kind)}</td><td>${fmtIn(o.widthIn)} × ${fmtIn(o.depthIn)} × ${fmtIn(o.heightIn)}</td><td>${o.template ? esc(o.template.name) : '<span class="muted">no template</span>'}</td></tr>`).join('');
   body.innerHTML = `<div class="card">
-    <div class="meta"><span class="status ${scan.status}">${scan.status}</span> #${scan.id} · ${when(scan.createdAt)}</div>
+    <div class="meta"><span class="status ${scan.status}">${scan.status}</span> #${scan.id} · ${when(scan.createdAt)}${scan.planFrame === 1 ? ' · older parser (mirror image)' : ''}</div>
     <h3>${esc(scan.label)}</h3>
-    <div class="meta">${scan.room ? `Rescan of Current room “${esc(scan.room.label)}”` : 'Creates a new Current room'}</div>
-    <p>${fmtIn(s.widthIn)} × ${fmtIn(s.depthIn)} · ceiling ${fmtIn(s.ceilingIn)} · ${s.walls.length} walls · ${s.openings.length} doors/windows/openings · ${s.objects.length} objects (not imported)</p>
-    <p class="small muted">Promoting writes one revision to Current and records every scanned value as a measurement. Pinned measurements always win. You can roll it back from Current's history.</p>
-    <div class="actions">${can ? `<button data-act="promote" class="approve">Promote to Current</button><button data-act="reject" class="danger">Reject</button>` : ''}</div>
+    <div class="meta">${scan.room ? `${scan.status === 'pending' ? 'Rescan of' : 'Room:'} “${esc(scan.room.label)}”` : 'Creates a new Current room'}</div>
+    <p>${fmtIn(s.widthIn)} × ${fmtIn(s.depthIn)} · ceiling ${fmtIn(s.ceilingIn)} · ${s.walls.length} walls · ${s.openings.length} doors/windows/openings · ${s.objects.length} objects</p>
+    <b>Photos (${scan.photos?.length ?? 0})</b>
+    ${scan.photos?.length ? `<div class="photo-grid">${scan.photos.map((ph) => `<a href="${esc(ph.url)}" target="_blank" rel="noopener"><img src="${esc(ph.url)}" alt="${esc(ph.prompt ?? 'Photo')}" loading="lazy"><div class="photo-cap">${esc(ph.prompt ?? '')}${ph.note ? ` · ${esc(ph.note)}` : ''}${ph.tags?.length ? ` · ${esc(ph.tags.join(', '))}` : ''}</div></a>`).join('')}</div>` : '<p class="muted small">No photos came with this scan.</p>'}
+    ${s.objects.length ? `<b>Objects → closest template</b><table class="objs">${objRows}</table>` : ''}
+    <p class="small muted">Promoting writes one revision to Current and records every scanned value as a measurement. Pinned measurements always win. You can roll it back from Current's history. Furniture isn't imported on promote; use “Furnish from scan” for a workspace with template pieces.</p>
+    <div class="actions">${can ? `<button data-act="promote" class="approve">Promote to Current</button><button data-act="reject" class="danger">Reject</button>` : ''}
+      ${state.editable && scan.status === 'promoted' ? `<button data-act="furnish" ${scan.canFurnish ? '' : 'disabled title="Only the scan that created the room, once the room is the right way round"'}>Furnish from scan</button>` : ''}</div>
   </div>`;
   body.querySelectorAll('button[data-act]').forEach((b) => (b.onclick = () => scanAction(id, b.dataset.act)));
 }
 async function scanAction(id, act) {
   const scan = state.scanPreviews.get(id);
   try {
+    if (act === 'furnish') {
+      const name = prompt('Name for the new workspace with these pieces', `${scan.label} furniture`)?.trim();
+      if (!name) return;
+      const r = await api.furnishScan(id, name);
+      toast(`Created a workspace with ${r.placements} piece(s)${r.skipped.length ? `; skipped ${r.skipped.length}` : ''}.`);
+      await refreshList(); await openTab(r.workspaceId, 0);
+      if (state.drawer === 'scan') openDrawer('scan');
+      return;
+    }
     if (act === 'promote') {
       if (!confirm(`Promote “${scan.label}” to Current?`)) return;
       const r = await api.promoteScan(id);
@@ -699,4 +811,4 @@ async function renderCurrentHistory() {
 async function openDrawerSilently() { state.proposals = await api.proposals(); }
 boot();
 
-window.housePlanner = { state, show, setSplit, syncFrom, openDrawer, previewProposal, showPairDialog, reviewScan };
+window.housePlanner = { state, show, setSplit, syncFrom, openDrawer, previewProposal, showPairDialog, reviewScan, renderRoomPhotos };
