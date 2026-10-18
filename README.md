@@ -49,11 +49,12 @@ Where this is headed: [PLAN.md](PLAN.md).
 Michael only: `POST /api/workspaces`, `/api/workspaces/:id/changes`, `/api/workspaces/:id/rollback`,
 `/api/proposals/:id/approve|reject`, `/api/measurements`, `/api/measurements/unpin`,
 `/api/upload-tokens` (pair phone; `{placementId}` for Capture this piece), `/api/scans/:id/promote|reject|furnish`,
-`/api/current/rollback`, `/api/rooms/:id/fix-mirror`, `POST /api/models`, `/api/placements/:id/model`.
+`/api/current/rollback`, `/api/rooms/:id/fix-mirror`, `POST /api/models`, `/api/placements/:id/model`,
+`/api/workspaces/:id/revert` (undo/redo), `/api/workspaces/:id/propose-as-current`, `/api/measurements/:id/withdraw`.
 Read: `GET /api/scans[/:id]`, `GET /api/current/history`, `GET /api/photos?roomId=|scanImportId=` (signed URLs, 10 min),
 `GET /api/templates`, `GET /api/models/:id[/file]`. Pairing code only (iPhone app): `/api/upload-tokens/validate|room`,
 `/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`, `/api/models/import`, `/api/suggestions`. Current changes only through promoted scans,
-measurements and rollbacks.
+measurements, approved proposals (furniture and colors only) and rollbacks.
 MCP: `POST /mcp` (see PLAN.md section 10).
 
 House data is never committed here. The seed comes from the private `tmbradley/house-data` repo.

@@ -691,6 +691,36 @@ link (AASA `applinks`) that opens the app. Details: `SCAN_SETUP.md` (server) and
   from Xcode. No Linux or cloud iOS builds (no GitHub Actions macOS runners). The bot writes the Swift
   code into the repo.
 
+### P8: Undo/redo, existing furniture in Current, scanned L-sectionals **[Oct 17, 2026]**
+
+- **Undo/redo (editor):** ⌘Z / Ctrl+Z undo, ⇧⌘Z / Ctrl+Y (or Ctrl+Shift+Z) redo, plus Undo/Redo
+  buttons in the tab bar (tooltips; shown on touch devices). Ignored while typing in a field. One
+  history per tab, in memory. Undo of a saved edit adds a **new revision** that reverts it
+  (`POST /api/workspaces/:id/revert`, kind `save`, `rolls_back_revision_id` set). History is never
+  rewritten. The base revision must be the latest (409 `conflict`; the editor reloads and retries
+  once). Every value the edit set must still be in place, or the undo is refused (409 `stale`).
+  Redo is the revert of the undo. Unsaved offline drafts are taken off or put back on the queue.
+  Measurements are withdrawn or restored (`measurements.withdrawn_at`,
+  `POST /api/measurements/:id/withdraw`); the field falls back to the previous measurement. It covers
+  moves, rotations, adds, deletes, template/parameter changes, room colors (new color inputs per
+  room) and measurements (sizes, wall heights, opening widths).
+- **Current holds existing furniture and colors** (placements with `workspace_id` NULL, `room_styles`
+  with `workspace_id` NULL). They change only through **proposals for Current** (`current: true`;
+  only placement, placement_param, furniture_item and room_style). Michael approves them, and they
+  can be rolled back. Structure stays scans and measurements only. MCP `propose_colors`,
+  `propose_furniture_template` and `propose_attach_model` take `current: true`; template and model
+  proposals default to where the placement is.
+- **New designs start from Current:** they get its placements, params and colors. Choose "Blank
+  workspace" for rooms only.
+- **"Make Current's furniture…"** (workspace pane header, Michael only) files a pending proposal. It
+  sets Current's pieces and colors, in that workspace's Current rooms, to the workspace's pieces
+  marked existing/keep and its colors. Pieces marked new/replace/remove are left out, and the
+  workspace is unchanged. Approve it in Proposals.
+- **L-sectionals from scans:** RoomPlan splits a sectional into separate "sofa" boxes. Furnish from
+  scan now merges touching boxes that form an L (run + chaise, optional attached ottoman at the
+  other end) into one `l_sectional`. New params: `chaiseWidthIn`, `ottomanSide`, `ottomanWidthIn`
+  and `ottomanDepthIn`. Existing workspaces are not changed.
+
 ---
 
 ## 12. Open questions for Michael

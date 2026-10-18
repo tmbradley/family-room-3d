@@ -1,3 +1,6 @@
 node_modules/
 .env
 *.local.json
+
+# Real house data (never committed; this repo is public)
+fixtures/private/

@@ -21,8 +21,10 @@ type Scope = 'read' | 'propose' | 'admin';
 const rank: Record<Scope, number> = { read: 0, propose: 1, admin: 2 };
 
 const INSTRUCTIONS = `House planner for Michael Bradley's house. Lengths are integer inches; room x/y are plan coordinates.
-"Current" is the house as scanned (structure only, locked: it changes through promoted scans, measurements and
-rollbacks). Designs live in workspaces, which link Current rooms and hold furniture and colors.
+"Current" is the house as it is now: structure from scans, plus the existing furniture and room colors. It is
+locked: structure changes through promoted scans, measurements and rollbacks; furniture and colors only through
+proposals for Current (current: true) that Michael approves. Designs live in workspaces, which link Current rooms,
+start from Current's furniture and colors, and change them freely.
 Photos from the iPhone are in list_room_photos (signed URLs valid a few minutes; call again for fresh ones).
 You can read and propose. You can never change a design directly: create_proposal records a pending
 change request that Michael approves or rejects in the editor. Every proposal needs a rationale, its
@@ -47,20 +49,24 @@ function buildServer(scope: Scope, agentKeyId: number) {
     inputSchema: { workspaceId: z.number().int() }, annotations: ro,
   }, ({ workspaceId }) => guard(() => getWorkspaceView(prisma, workspaceId)));
   server.registerTool('get_room', {
-    title: 'Get room', description: 'One room with walls, openings, fixtures and the placements of a workspace (defaults to the room\'s own workspace), with measurement sources.',
+    title: 'Get room', description: 'One room with walls, openings, fixtures, furniture placements and colors: of a workspace, or of Current (the house as it is now) when workspaceId is omitted for a Current room. With measurement sources.',
     inputSchema: { roomId: z.number().int(), workspaceId: z.number().int().optional() }, annotations: ro,
   }, ({ roomId, workspaceId }) => guard(() => getRoomView(prisma, roomId, workspaceId)));
   server.registerTool('list_proposals', {
     title: 'List proposals', description: 'Proposals (newest first) with target, rooms, field-level changes (before/after), rationale, source and cost steps. Pass proposalId for one.',
     inputSchema: {
-      status: z.enum(['pending', 'approved', 'rejected']).optional(), workspaceId: z.number().int().optional(),
+      status: z.enum(['pending', 'approved', 'rejected']).optional(), workspaceId: z.number().int().optional(), current: z.boolean().optional().describe('Only proposals for Current'),
       proposalId: z.number().int().optional(), limit: z.number().int().min(1).max(200).optional(),
     }, annotations: ro,
   }, (a) => guard(async () => (a.proposalId != null ? [await getProposal(a.proposalId)] : listProposals(a))));
   server.registerTool('get_history', {
-    title: 'Get history', description: 'Append-only revision history of a workspace (newest first) with field-level changes.',
-    inputSchema: { workspaceId: z.number().int(), limit: z.number().int().min(1).max(200).optional() }, annotations: ro,
-  }, ({ workspaceId, limit }) => guard(() => getHistory(prisma, workspaceId, limit)));
+    title: 'Get history', description: 'Append-only revision history of a workspace, or of Current when workspaceId is omitted (newest first), with field-level changes.',
+    inputSchema: { workspaceId: z.number().int().optional(), limit: z.number().int().min(1).max(200).optional() }, annotations: ro,
+  }, ({ workspaceId, limit }) => guard(async () => {
+    if (workspaceId != null) return getHistory(prisma, workspaceId, limit);
+    const house = await prisma.house.findFirstOrThrow({ orderBy: { id: 'asc' } });
+    return getHistory(prisma, { currentOf: house.id }, limit);
+  }));
 
   server.registerTool('list_room_photos', {
     title: 'List room photos', description: 'Photos Michael took with the iPhone app, by room or by scan import: note, tags, guided prompt, and a signed URL you can open (expires in ~10 minutes).',
@@ -96,22 +102,31 @@ The whole change list is validated before it's stored; pinned measurements are r
     }, (input) => guard(() => createProposal(input as any, { actor: 'agent', agentKeyId })));
 
     const common = {
-      workspaceId: proposalShape.workspaceId.unwrap().describe('Workspace the change is for (it must contain the room / placement)'),
+      workspaceId: proposalShape.workspaceId.describe('Workspace the change is for (it must contain the room / placement). Omit and pass current: true for Current.'),
+      current: z.boolean().optional().describe('Propose for Current (the house as it is now) instead of a workspace; Michael approves'),
       title: z.string().min(3).max(200).optional(),
       rationale: proposalShape.rationale, source: proposalShape.source, cost: proposalShape.cost,
       photoIds: proposalShape.photoIds,
     };
     const colorSpec = z.object({ name: z.string().max(60).optional().describe('Paint or finish name, e.g. "Benjamin Moore Chantilly Lace OC-65"'), color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional() }).optional();
-    const propose = (title: string, roomIds: number[], changes: any[], a: any) =>
-      createProposal({ title: a.title ?? title, rationale: a.rationale, workspaceId: a.workspaceId, roomIds, source: a.source, changes, cost: a.cost, photoIds: a.photoIds }, { actor: 'agent', agentKeyId });
+    const target = (a: any, placementWs?: number | null) => {
+      if (a.current && a.workspaceId != null) throw new Error('Pass workspaceId or current: true, not both');
+      if (a.current) return { current: true as const, workspaceId: null };
+      if (a.workspaceId != null) return { current: false as const, workspaceId: a.workspaceId as number };
+      if (placementWs !== undefined) return placementWs === null ? { current: true as const, workspaceId: null } : { current: false as const, workspaceId: placementWs };
+      throw new Error('Pass workspaceId, or current: true for Current');
+    };
+    const propose = (title: string, roomIds: number[], changes: any[], a: any, t: { current: boolean; workspaceId: number | null }) =>
+      createProposal({ title: a.title ?? title, rationale: a.rationale, ...(t.current ? { current: true } : { workspaceId: t.workspaceId! }), roomIds, source: a.source, changes, cost: a.cost, photoIds: a.photoIds }, { actor: 'agent', agentKeyId });
 
     server.registerTool('propose_colors', {
       title: 'Propose room colors',
-      description: 'Propose wall, trim, floor and outlet/switch colors for a room in a workspace (works for Current rooms the workspace links). Reference the photos you looked at with photoIds. Creates a pending proposal only.',
+      description: 'Propose wall, trim, floor and outlet/switch colors for a room: in a workspace (works for Current rooms the workspace links), or with current: true the colors the room has now (e.g. read from photos). Reference the photos you looked at with photoIds. Creates a pending proposal only.',
       inputSchema: { ...common, roomId: z.number().int(), wall: colorSpec, trim: colorSpec, floor: colorSpec, devices: colorSpec.describe('Outlets and switches (plates and devices)') },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     }, (a) => guard(async () => {
-      const style = await prisma.roomStyle.findFirst({ where: { workspaceId: a.workspaceId, roomId: a.roomId } });
+      const t = target(a);
+      const style = await prisma.roomStyle.findFirst({ where: { workspaceId: t.workspaceId, roomId: a.roomId } });
       const fields: Record<string, string> = {};
       for (const [part, prefix] of [['wall', 'wall'], ['trim', 'trim'], ['floor', 'floor'], ['devices', 'device']] as const) {
         const v = (a as any)[part];
@@ -122,12 +137,12 @@ The whole change list is validated before it's stored; pinned measurements are r
       const changes = style
         ? Object.entries(fields).map(([field, value]) => ({ op: 'update', entityType: 'room_style', entityId: style.id, field, value }))
         : [{ op: 'create', entityType: 'room_style', tempRef: 'colors', fields: { roomId: a.roomId, ...fields } }];
-      return propose('Colors', [a.roomId], changes, a);
+      return propose(t.current ? 'Colors now (Current)' : 'Colors', [a.roomId], changes, a, t);
     }));
 
     server.registerTool('propose_furniture_template', {
       title: 'Propose a furniture template',
-      description: 'Propose drawing a placement with a parametric template (see list_templates) and parameter values. Unknown keys and out-of-range values are refused. Creates a pending proposal only.',
+      description: 'Propose drawing a placement with a parametric template (see list_templates) and parameter values. The target defaults to where the placement is (a workspace, or Current for existing furniture). Unknown keys and out-of-range values are refused. Creates a pending proposal only.',
       inputSchema: { ...common, placementId: z.number().int(), template: z.string().max(40).describe('Template slug, e.g. "l_sectional"'), params: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({}) },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     }, (a) => guard(async () => {
@@ -146,7 +161,9 @@ The whole change list is validated before it's stored; pinned measurements are r
         else changes.push({ op: 'create', entityType: 'placement_param', fields: { placementId: pl.id, key, value: String(value) } });
       }
       if (!changes.length) throw new Error('Nothing to change: the placement already uses that template and those values');
-      return propose(`${pl.item.name}: ${def.name}`, [pl.roomId], changes, a);
+      const tg = target(a, pl.workspaceId);
+      if (tg.workspaceId !== pl.workspaceId) throw new Error(`placement ${pl.id} is in ${pl.workspaceId == null ? 'Current' : `workspace ${pl.workspaceId}`}, not ${tg.current ? 'Current' : `workspace ${tg.workspaceId}`}`);
+      return propose(`${pl.item.name}: ${def.name}`, [pl.roomId], changes, a, tg);
     }));
 
     server.registerTool('propose_attach_model', {
@@ -159,7 +176,9 @@ The whole change list is validated before it's stored; pinned measurements are r
       if (!pl) throw new Error(`placement ${a.placementId} not found`);
       if (a.modelId != null && !(await prisma.furnitureModel.findUnique({ where: { id: a.modelId } }))) throw new Error(`model ${a.modelId} not found (see list_models)`);
       const ops: any[] = [{ op: 'update', entityType: 'placement', entityId: pl.id, field: 'modelId', value: a.modelId }];
-      return propose(a.modelId == null ? `${pl.item.name}: remove 3D model` : `${pl.item.name}: use 3D model #${a.modelId}`, [pl.roomId], ops, a);
+      const tg = target(a, pl.workspaceId);
+      if (tg.workspaceId !== pl.workspaceId) throw new Error(`placement ${pl.id} is in ${pl.workspaceId == null ? 'Current' : `workspace ${pl.workspaceId}`}, not ${tg.current ? 'Current' : `workspace ${tg.workspaceId}`}`);
+      return propose(a.modelId == null ? `${pl.item.name}: remove 3D model` : `${pl.item.name}: use 3D model #${a.modelId}`, [pl.roomId], ops, a, tg);
     }));
   }
   return server;

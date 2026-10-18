@@ -25,6 +25,7 @@ import type { Tx } from './entities.js';
 import { listPhotos } from './photos.js';
 import { matchTemplate, templateBySlug } from './templates.js';
 import { createBlankWorkspace } from './workspaces.js';
+import { mergeSectionals } from './sectional.js';
 
 // ---------------------------------------------------------------------------
 // Input validation (only the parts we use; everything else is passed through and ignored)
@@ -540,7 +541,18 @@ export async function furnishFromScan(id: number, name?: string) {
     const ops: Op[] = [];
     let n = 0;
     const skipped: string[] = [];
-    for (const o of scan.objects) {
+    // RoomPlan splits an L-sectional (and an attached ottoman) into separate "sofa" boxes: put them back together.
+    const { merged, rest } = mergeSectionals(scan.objects);
+    const lt = templates.get('l_sectional');
+    for (const m of lt ? merged : []) {
+      const i = n++;
+      ops.push({ op: 'create', entityType: 'furniture_item', tempRef: `i${i}`, fields: {
+        kind: lt!.kind, name: m.name.slice(0, 160), wIn: m.widthIn, dIn: m.depthIn, hIn: m.heightIn, status: 'existing', notes: `From scan #${id}. ${m.notes}`.slice(0, 500),
+      } });
+      ops.push({ op: 'create', entityType: 'placement', tempRef: `p${i}`, fields: { roomId: si.roomId!, itemId: `$i${i}`, xIn: m.xIn, yIn: m.yIn, rotationDeg: m.rotationDeg, action: 'existing', templateId: lt!.id } });
+      for (const [key, value] of Object.entries(m.params)) ops.push({ op: 'create', entityType: 'placement_param', tempRef: `p${i}_${key}`, fields: { placementId: `$p${i}`, key, value } });
+    }
+    for (const o of lt ? rest : scan.objects) {
       const m = matchTemplate(o.kind, o.widthIn, o.depthIn, o.heightIn);
       const t = m && templates.get(m.slug);
       if (!m || !t) {
@@ -564,7 +576,7 @@ export async function furnishFromScan(id: number, name?: string) {
     }
     if (!ops.length) throw new ApiError(409, 'nothing_to_furnish', 'The scan has no objects that match a template');
     const { changes } = await applyOps(tx, ops, { workspaceId: ws.id, mode: 'save' });
-    const rev = await commitRevision(tx, { workspaceId: ws.id, kind: 'save', actor: 'michael', changes, note: `Furniture from scan #${id}: ${n} piece(s) matched to templates${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}` });
-    return { workspaceId: ws.id, revision: rev.number, placements: n, skipped };
+    const rev = await commitRevision(tx, { workspaceId: ws.id, kind: 'save', actor: 'michael', changes, note: `Furniture from scan #${id}: ${n} piece(s) matched to templates${merged.length && lt ? ` (${merged.length} L-sectional(s) merged from separate sofa boxes)` : ''}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}` });
+    return { workspaceId: ws.id, revision: rev.number, placements: n, skipped, mergedSectionals: lt ? merged.length : 0 };
   }, { timeout: 60_000 });
 }

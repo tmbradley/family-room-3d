@@ -205,7 +205,15 @@ const TEMPLATE_BUILDERS = {
     const legs = prm.legStyle === 'metal' ? metalMat(prm) : woodMat(prm);
     const side = prm.chaiseSide === 'left' ? -1 : 1;
     const seatD = Math.min(ft(num(prm.seatDepthIn, 22)) + 0.95, d * 0.6), backD = 0.7, base = Math.max(ft(num(prm.legHeightIn, 4)), 0.01), cushH = 0.35;
-    const chL = Math.min(ft(num(prm.chaiseDepthIn, 66)), d), chW = seatD;
+    const chL = Math.min(ft(num(prm.chaiseDepthIn, 66)), d), chW = num(prm.chaiseWidthIn, 0) > 0 ? Math.min(ft(num(prm.chaiseWidthIn, 0)), w * 0.6) : seatD;
+    // Attached ottoman: in front of the run at the end away from the chaise (RoomPlan sees it as its own "sofa" box).
+    const oSide = prm.ottomanSide === 'left' ? -1 : prm.ottomanSide === 'right' ? 1 : 0;
+    if (oSide && oSide !== side) {
+      const ow = Math.min(ft(num(prm.ottomanWidthIn, 36)), w - chW), od = Math.min(ft(num(prm.ottomanDepthIn, 30)), d - seatD);
+      const ob = Math.max(ft(num(prm.legHeightIn, 4)), 0.01);
+      g.add(box(ow, 0.9, od, fab, oSide * (w / 2 - ow / 2), ob, -d / 2 + seatD + od / 2));
+      g.add(box(ow - 0.06, 0.35, od - 0.05, cush, oSide * (w / 2 - ow / 2), ob + 0.9, -d / 2 + seatD + od / 2));
+    }
     const armStyle = prm.armStyle ?? 'track', arm = armStyle === 'none' ? 0 : 0.45;
     if (prm.legStyle !== 'plinth' && base > 0.02) {
       for (const [x, z] of [[-w / 2 + 0.25, -d / 2 + 0.25], [w / 2 - 0.25, -d / 2 + 0.25], [-side * (w / 2 - 0.25), -d / 2 + seatD - 0.25], [side * (w / 2 - 0.25), -d / 2 + chL - 0.25], [side * (w / 2 - chW + 0.25), -d / 2 + chL - 0.25]])

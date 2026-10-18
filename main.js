@@ -3,6 +3,7 @@
 import { CATALOG } from './catalog.js';
 import { RoomView, escapeHtml as esc, footprintFt, setTemplates } from './scene.js';
 import { api, ApiError } from './api.js';
+import { UndoBook, applyEntry, shortcutFor } from './undo.js';
 
 const $ = (id) => document.getElementById(id);
 const LS = { tabs: 'hp.tabs.v1', drafts: 'hp.drafts.v1', prefs: 'hp.prefs.v1' };
@@ -14,6 +15,7 @@ const state = {
   me: null, editable: false, house: null, workspaces: [], cache: new Map(), previews: new Map(),
   openTabs: JSON.parse(localStorage.getItem(LS.tabs) || 'null'), panes: [], focused: 0,
   drawer: null, proposals: [], selection: null, scans: [], scanPreviews: new Map(), scanReview: null, templates: [],
+  undo: new UndoBook(100), undoBusy: false, // per-tab undo/redo (in memory, this browser tab only)
 };
 
 // ---------------------------------------------------------------------------
@@ -55,7 +57,7 @@ async function refreshList() {
 async function refreshProposals() {
   const all = await api.proposals($('propFilter').value || undefined);
   state.proposals = all;
-  const pending = state.workspaces.reduce((a, w) => a + w.pendingProposals, 0) + (await api.proposals('pending')).filter((p) => p.target.kind === 'new_workspace').length;
+  const pending = $('propFilter').value === 'pending' ? all.length : (await api.proposals('pending')).length;
   $('pendingCount').hidden = !pending; $('pendingCount').textContent = pending;
 }
 
@@ -84,7 +86,7 @@ function focusPane(i) {
   if (i < 0 || i === state.focused) return;
   state.focused = i;
   state.panes.forEach((p, j) => p.el.classList.toggle('focused', j === i && state.panes.length > 1));
-  state.selection = null; renderSelection(); renderTabs(); renderRoomPhotos();
+  state.selection = null; renderSelection(); renderTabs(); renderRoomPhotos(); renderUndo();
   if (state.drawer === 'history') renderHistory();
 }
 
@@ -110,14 +112,20 @@ async function show(i, key) {
   const tools = head.querySelector('.tools');
   tools.innerHTML = pvId != null || scId != null
     ? `<span class="chip">preview, not saved</span>`
-    : key === 'cur' ? `<span class="chip ro">locked: scans, measurements, rollback</span>`
+    : key === 'cur' ? `<span class="chip ro" title="Current is the house as it is now. Structure changes through scans and measurements; furniture and colors through proposals you approve.">locked: scans, measurements, approved proposals</span>`
     : editable ? '' : `<span class="chip ro">read-only</span>`;
+  if (editable && wsId != null && data.rooms?.some((r) => r.draftWorkspaceId == null)) {
+    const b = document.createElement('button'); b.textContent = "Make Current's furniture…";
+    b.title = "Propose this design's existing pieces and colors as what is in the house now (you approve it in Proposals)";
+    b.onclick = (e) => { e.stopPropagation(); proposeAsCurrent(wsId); };
+    tools.appendChild(b);
+  }
   if (state.panes.length > 1 && i === 1) {
     const x = document.createElement('button'); x.textContent = '✕'; x.title = 'Close split'; x.onclick = (e) => { e.stopPropagation(); setSplit(false); };
     tools.appendChild(x);
   }
   renderTabs();
-  if (i === state.focused) { const sel = pane.view.selected; state.selection = sel != null ? pane.view.placement(sel) : null; renderSelection(); renderRoomPhotos(); }
+  if (i === state.focused) { const sel = pane.view.selected; state.selection = sel != null ? pane.view.placement(sel) : null; renderSelection(); renderRoomPhotos(); renderUndo(); }
 }
 
 async function rerenderWs(wsId) {
@@ -204,18 +212,17 @@ async function renameWs(id) {
 function renderNewMenu() {
   const m = $('newMenu'); m.innerHTML = '';
   const add = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { m.hidden = true; fn(); }; m.appendChild(b); };
-  add('Blank workspace', () => createWs());
+  if (state.house?.hasCurrent) add('New design from Current (its furniture and colors)', () => createWs(undefined, 'New design', 'current'));
+  else { const cur = document.createElement('div'); cur.className = 'disabled'; cur.textContent = 'New design from Current (no Current yet)'; m.appendChild(cur); }
+  add('Blank workspace (rooms only, no furniture)', () => createWs(undefined, 'New design', 'none'));
   const sep = document.createElement('div'); sep.className = 'sep'; m.appendChild(sep);
   for (const w of state.workspaces) add(`Copy of “${w.name}”`, () => createWs(w.id, `${w.name} (copy)`));
-  const cur = document.createElement('div'); cur.className = 'disabled';
-  cur.textContent = state.house?.hasCurrent ? 'Copy from Current' : 'Copy from Current (no Current yet)';
-  m.appendChild(cur);
 }
-async function createWs(copyFrom, suggested) {
+async function createWs(copyFrom, suggested, furnishings) {
   const name = prompt('Name for the new workspace', suggested || 'New design')?.trim();
   if (!name) return;
   try {
-    const ws = await api.createWorkspace(name, copyFrom);
+    const ws = await api.createWorkspace(name, copyFrom, furnishings);
     state.cache.set(ws.id, ws); await refreshList();
     await openTab(ws.id);
     toast(`Created “${ws.name}”`);
@@ -225,13 +232,14 @@ async function createWs(copyFrom, suggested) {
 // ---------------------------------------------------------------------------
 // Editing (every edit = a revision; Michael's own edits count as approved)
 // ---------------------------------------------------------------------------
-async function saveOps(wsId, changes, note) {
+async function saveOps(wsId, changes, note, local) {
   const ws = await loadWs(wsId);
   $('saveStatus').textContent = 'Saving…';
   try {
     const r = await api.save(wsId, ws.revision, changes, note);
     $('saveStatus').textContent = r.unchanged ? 'No change.' : `Saved as revision ${r.revision} · ${new Date().toLocaleTimeString()}`;
     clearDraft(wsId);
+    if (!r.unchanged) recordUndo(`ws:${wsId}`, { kind: 'rev', wsId, revision: r.revision, label: note });
     await rerenderWs(wsId);
     return r;
   } catch (e) {
@@ -240,21 +248,32 @@ async function saveOps(wsId, changes, note) {
       toast(e.status === 409 && e.body?.error === 'conflict' ? 'This workspace changed on another device. Reloaded the latest.' : `Not saved: ${errMsg(e)}`, true);
       await rerenderWs(wsId);
     } else {
-      keepDraft(wsId, ws.revision, changes, note);
+      const draft = keepDraft(wsId, ws.revision, changes, note, local);
+      recordUndo(`ws:${wsId}`, { kind: 'draft', wsId, draft, label: note });
       $('saveStatus').textContent = 'Offline: kept as a draft on this device; it will be saved when you reconnect.';
     }
   }
 }
 function drafts() { return JSON.parse(localStorage.getItem(LS.drafts) || '[]'); }
-function keepDraft(wsId, baseRevision, changes, note) { localStorage.setItem(LS.drafts, JSON.stringify([...drafts(), { wsId, baseRevision, changes, note }])); }
+function keepDraft(wsId, baseRevision, changes, note, local) {
+  // local: [{ id, field, before, after }] for edits already drawn on screen (moves), so undo can draw them back offline.
+  const d = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, wsId, baseRevision, changes, note, local };
+  queueDraft(d); return d;
+}
+function queueDraft(d) { localStorage.setItem(LS.drafts, JSON.stringify([...drafts(), d])); }
+function dropDraft(d) { const list = drafts(); const rest = list.filter((x) => x.id !== d.id); localStorage.setItem(LS.drafts, JSON.stringify(rest)); return rest.length < list.length; }
 function clearDraft(wsId) { localStorage.setItem(LS.drafts, JSON.stringify(drafts().filter((d) => d.wsId !== wsId))); }
 async function flushDrafts() {
   const list = drafts(); if (!list.length || !state.editable) return;
   localStorage.setItem(LS.drafts, '[]');
   for (const d of list) {
-    try { await api.save(d.wsId, d.baseRevision, d.changes, d.note); toast('Saved your offline edits'); }
-    catch (e) { if (!(e instanceof ApiError)) { keepDraft(d.wsId, d.baseRevision, d.changes, d.note); return; } toast(`An offline edit couldn't be saved: ${errMsg(e)}`, true); }
+    try {
+      const r = await api.save(d.wsId, d.baseRevision, d.changes, d.note); toast('Saved your offline edits');
+      // Its undo entry now points at the saved revision.
+      if (d.id) state.undo.replaceAll((e) => e.draft?.id === d.id, (e) => (e.kind === 'draft' && !r.unchanged ? { kind: 'rev', wsId: d.wsId, revision: r.revision, label: e.label } : e));
+    } catch (e) { if (!(e instanceof ApiError)) { queueDraft(d); return; } toast(`An offline edit couldn't be saved: ${errMsg(e)}`, true); }
   }
+  renderUndo();
   for (const id of new Set(list.map((d) => d.wsId))) if (state.cache.has(id)) await rerenderWs(id);
 }
 window.addEventListener('online', flushDrafts);
@@ -262,7 +281,7 @@ window.addEventListener('online', flushDrafts);
 function commitMove(pane, p, before) {
   const wsId = keyWs(pane?.key); if (wsId == null) return;
   const changes = ['xIn', 'yIn', 'rotationDeg'].filter((f) => p[f] !== before[f]).map((f) => ({ op: 'update', entityType: 'placement', entityId: p.id, field: f, value: p[f] }));
-  if (changes.length) saveOps(wsId, changes, `Moved ${p.item.name}`);
+  if (changes.length) saveOps(wsId, changes, `${changes.some((c) => c.field === 'rotationDeg') && changes.length === 1 ? 'Rotated' : 'Moved'} ${p.item.name}`, changes.map((c) => ({ id: p.id, field: c.field, before: before[c.field], after: p[c.field] })));
 }
 function focusedWs() { return keyWs(state.panes[state.focused]?.key); }
 function addPiece(spec) {
@@ -331,15 +350,19 @@ function renderMeasurements() {
   el.querySelectorAll('button[data-act]').forEach((b) => (b.onclick = () => measure(b)));
 }
 async function measure(btn) {
-  const row = btn.closest('.meas'), wsId = focusedWs();
+  const row = btn.closest('.meas'), wsId = focusedWs(), key = state.panes[state.focused]?.key;
   const body = { workspaceId: wsId, entityType: row.dataset.et, entityId: Number(row.dataset.id), field: row.dataset.field };
+  const inp = row.querySelector('input'), beforeIn = inp.defaultValue === '' ? undefined : Number(inp.defaultValue);
+  const what = `${row.querySelector('span')?.firstChild?.textContent ?? row.dataset.field}`;
   try {
     if (btn.dataset.act === 'unpin') {
       await api.unpin(body); toast('Unpinned. The newest measurement is used again.');
+      if (beforeIn != null) recordUndo(key, { kind: 'repin', key, body, valueIn: beforeIn, label: `Unpin ${what}` });
     } else {
-      const valueIn = Math.round(Number(row.querySelector('input').value));
+      const valueIn = Math.round(Number(inp.value));
       if (!Number.isFinite(valueIn) || valueIn <= 0) return toast('Enter a value in inches', true);
       const r = await api.measure({ ...body, valueIn, action: btn.dataset.act === 'pin' ? 'pin' : 'measured' });
+      recordUndo(key, { kind: 'meas', key, measurementId: r.measurementId, withdraw: true, restoreIn: beforeIn, workspaceId: wsId, label: `${btn.dataset.act === 'pin' ? 'Pin' : 'Measure'} ${what}: ${fmtIn(valueIn)}` });
       toast(r.applied ? (btn.dataset.act === 'pin' ? `Pinned at ${fmtIn(valueIn)}. Scans and estimates won't change it.` : `Saved ${fmtIn(valueIn)} as measured`) : `Recorded, but the pinned value (${fmtIn(r.effective.valueIn)}) still wins`);
     }
     const sel = state.selection?.id;
@@ -423,12 +446,31 @@ async function renderRoomPhotos() {
   const sw = (c) => (c?.color ? `<span class="swatch" style="background:${esc(c.color)}"></span>${esc(c.name ?? c.color)}` : c?.name ? esc(c.name) : '—');
   $('roomStyle').innerHTML = rooms.map((r) => `<div><b>${esc(r.label)}</b>: walls ${sw(r.wallColor)} · trim ${sw(r.trimColor)} · floor ${sw({ color: r.floor?.color, name: r.floor?.colorName })} · outlets/switches ${sw(r.deviceColor)}</div>
     ${r.mirrored ? `<div class="mirror-banner">This room came from an older scan and is drawn as a <b>mirror image</b>. ${state.editable ? `<button data-mirror="${r.id}">Fix mirror image</button>` : 'Michael can fix it.'}</div>` : ''}`).join('');
+  const wsId = keyWs(state.panes[state.focused]?.key);
+  if (state.editable && wsId != null) {
+    const hex = (c) => (/^#[0-9a-f]{6}/i.test(c ?? '') ? c.slice(0, 7) : '#ffffff');
+    $('roomStyle').insertAdjacentHTML('beforeend', rooms.map((r) => `<div class="colors" data-room="${r.id}"><span class="muted">Colors in this design:</span>
+      ${[['wall', 'Walls', r.wallColor?.color], ['trim', 'Trim', r.trimColor?.color], ['floor', 'Floor', r.floor?.color], ['device', 'Outlets', r.deviceColor?.color]]
+        .map(([k, l, c]) => `<label title="${l} color (undo with ⌘Z / Ctrl+Z)">${l} <input type="color" data-color="${k}" value="${esc(hex(c))}"></label>`).join('')}</div>`).join(''));
+    $('roomStyle').querySelectorAll('.colors input[data-color]').forEach((inp) => (inp.onchange = () => {
+      const room = rooms.find((r) => r.id === Number(inp.closest('.colors').dataset.room));
+      setColor(wsId, room, inp.dataset.color, inp.value);
+    }));
+  }
   $('roomStyle').querySelectorAll('button[data-mirror]').forEach((b) => (b.onclick = () => fixMirror(Number(b.dataset.mirror))));
   sec.hidden = false;
   let photos = [];
   try { photos = (await Promise.all(rooms.map((r) => api.photos({ roomId: r.id })))).flat(); } catch { /* reader without photos */ }
   if (n !== photoReq) return;
   $('photoStrip').innerHTML = photos.length ? photos.map(photoThumb).join('') : '<span class="muted small">No photos for this room yet.</span>';
+}
+function setColor(wsId, room, k, value) {
+  const label = { wall: 'walls', trim: 'trim', floor: 'floor', device: 'outlets/switches' }[k];
+  const st = room.style;
+  const changes = st
+    ? [{ op: 'update', entityType: 'room_style', entityId: st.id, field: `${k}Color`, value }, ...(st[`${k}ColorName`] ? [{ op: 'update', entityType: 'room_style', entityId: st.id, field: `${k}ColorName`, value: null }] : [])]
+    : [{ op: 'create', entityType: 'room_style', fields: { roomId: room.id, [`${k}Color`]: value } }];
+  saveOps(wsId, changes, `${room.label}: ${label} color ${value}`);
 }
 const photoThumb = (ph) => `<a href="${esc(ph.url)}" target="_blank" rel="noopener" title="${esc([ph.prompt, ph.note, ph.tags.join(', ')].filter(Boolean).join(' · '))}"><img src="${esc(ph.url)}" alt="${esc(ph.prompt ?? 'Room photo')}" loading="lazy"></a>`;
 async function fixMirror(roomId) {
@@ -461,7 +503,7 @@ function diffRow(c) {
   return `<tr><td>new ${esc(c.entityType.replace('_', ' '))} ${esc(c.label ?? '')}</td><td><span class="after">${f}</span></td></tr>`;
 }
 function proposalCard(p) {
-  const target = p.target.kind === 'current' ? 'Current (measurements)' : p.target.kind === 'new_workspace'
+  const target = p.target.kind === 'current' ? (p.target.what === 'furnishings' ? 'Current (furniture and colors as they are now)' : 'Current (measurements)') : p.target.kind === 'new_workspace'
     ? `New workspace “${esc(p.target.name)}” (copy of ${esc(p.target.copyFrom?.name ?? '?')})${p.target.createdWorkspace ? ` → created #${p.target.createdWorkspace.id}` : ''}`
     : esc(p.target.workspace?.name ?? 'deleted workspace');
   const src = p.source.url ? `<a href="${esc(p.source.url)}" target="_blank" rel="noopener">${esc(p.source.kind.replace('_', ' '))}</a>` : esc(p.source.kind.replace('_', ' '));
@@ -496,7 +538,8 @@ async function previewProposal(id) {
   state.previews.delete(id);
   try { state.previews.set(id, await api.preview(id)); } catch (e) { return toast(`Preview failed: ${errMsg(e)}`, true); }
   const base = p.target.kind === 'workspace' ? p.target.workspace.id : p.target.copyFrom?.id;
-  if (base != null) await openTab(base, 0);
+  if (p.target.kind === 'current' && state.house?.hasCurrent) await show(0, 'cur');
+  else if (base != null) await openTab(base, 0);
   if (state.panes.length < 2) setSplit(true, `pv:${id}`); else await show(1, `pv:${id}`);
   prefs.sync = true; $('syncToggle').checked = true; savePrefs();
   syncFrom(state.panes[0]);
@@ -509,7 +552,10 @@ async function proposalAction(id, act) {
       if (!confirm(`Approve “${p.title}”?\n\nThis applies ${p.changes.length} change(s) as a new revision. You can roll it back from History.`)) return;
       const r = await api.approve(id);
       state.previews.delete(id);
-      if (r.workspaceId == null) { toast(`Approved. Recorded ${r.measurements?.length ?? 0} measurement(s) in Current.`); await refreshHouse(); }
+      if (r.workspaceId == null) {
+        toast(p.kind === 'measurements' ? `Approved. Recorded ${r.measurements?.length ?? 0} measurement(s) in Current.` : `Approved. Current is now at revision ${r.revision}. Roll it back from Current's History if needed.`);
+        await refreshHouse();
+      }
       else {
         toast(`Approved. Applied as revision ${r.revision} of ${wsName(r.workspaceId) || 'the new workspace'}.`);
         await refreshList(); await openTab(r.workspaceId, 0); await rerenderWs(r.workspaceId);
@@ -560,6 +606,77 @@ async function renderHistory() {
 }
 
 // ---------------------------------------------------------------------------
+// Undo / redo (per tab). Saved edits are undone by a new revision that reverts them (history is never
+// rewritten, and the server refuses if a later edit changed the same values); unsaved offline edits are
+// taken off the queue; measurements are withdrawn or restored.
+// ---------------------------------------------------------------------------
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+function recordUndo(key, entry) { if (!key) return; state.undo.of(key).record(entry); renderUndo(); }
+function renderUndo() {
+  const key = state.panes[state.focused]?.key, h = key && (keyWs(key) != null || key === 'cur') ? state.undo.of(key) : null;
+  const u = h?.peekUndo(), r = h?.peekRedo();
+  $('btnUndo').disabled = !u || state.undoBusy; $('btnRedo').disabled = !r || state.undoBusy;
+  $('btnUndo').title = u ? `Undo: ${u.label ?? 'last edit'} (${MAC ? '⌘Z' : 'Ctrl+Z'})` : `Nothing to undo in this tab (${MAC ? '⌘Z' : 'Ctrl+Z'})`;
+  $('btnRedo').title = r ? `Redo: ${r.label ?? 'edit'} (${MAC ? '⇧⌘Z' : 'Ctrl+Y'})` : `Nothing to redo in this tab (${MAC ? '⇧⌘Z' : 'Ctrl+Y or Ctrl+Shift+Z'})`;
+}
+const undoDeps = {
+  async revert(wsId, revision) {
+    for (let attempt = 0; ; attempt++) {
+      const ws = await loadWs(wsId, attempt > 0);
+      try { return await api.revert(wsId, ws.revision, revision); }
+      catch (e) { if (attempt === 0 && e instanceof ApiError && e.body?.error === 'conflict') continue; throw e; } // reload once; field checks still apply
+    }
+  },
+  dropDraft: (d) => { const ok = dropDraft(d); if (ok) drawLocal(d, 'before'); return ok; },
+  queueDraft: (d) => { queueDraft(d); drawLocal(d, 'after'); },
+  withdraw: (id, withdrawn, restoreIn, workspaceId) => api.withdrawMeasurement(id, { withdrawn, restoreIn, workspaceId }),
+  pin: (body, valueIn) => api.measure({ ...body, valueIn, action: 'pin' }),
+};
+/** Offline: put moved pieces back (or forward) on screen, since there is no server copy to reload. */
+function drawLocal(d, which) {
+  const ws = state.cache.get(d.wsId); if (!ws || !d.local?.length) return;
+  for (const r of ws.rooms) for (const p of r.furniture) for (const l of d.local) if (l.id === p.id) p[l.field] = l[which];
+  state.panes.forEach((p, i) => { if (keyWs(p.key) === d.wsId) show(i, p.key); });
+}
+async function undoStep(dir) {
+  if (!state.editable || state.undoBusy) return;
+  const key = state.panes[state.focused]?.key;
+  if (!key || (keyWs(key) == null && key !== 'cur')) return;
+  const h = state.undo.of(key), from = dir === 'undo' ? h.undo : h.redo, to = dir === 'undo' ? h.redo : h.undo;
+  const e = from.pop();
+  if (!e) { toast(dir === 'undo' ? 'Nothing to undo in this tab' : 'Nothing to redo in this tab'); return; }
+  state.undoBusy = true; renderUndo();
+  $('saveStatus').textContent = dir === 'undo' ? 'Undoing…' : 'Redoing…';
+  try {
+    const back = await applyEntry(e, undoDeps);
+    if (back) to.push(back);
+    $('saveStatus').textContent = back?.kind === 'rev' ? `${dir === 'undo' ? 'Undone' : 'Redone'} as revision ${back.revision} · ${new Date().toLocaleTimeString()}` : back ? `${dir === 'undo' ? 'Undone' : 'Redone'}` : 'Nothing left to change.';
+    toast(`${dir === 'undo' ? 'Undid' : 'Redid'}: ${e.label ?? 'edit'}`);
+  } catch (err) {
+    if (err instanceof ApiError) {
+      $('saveStatus').textContent = 'Not changed.';
+      toast(`Can't ${dir} “${e.label ?? 'edit'}”: ${errMsg(err)}`, true); // e.g. changed since on another device; dropped
+    } else { from.push(e); toast(`Can't ${dir} while offline. Try again when you're connected.`, true); }
+  } finally {
+    state.undoBusy = false;
+    const sel = state.selection?.id, wsId = keyWs(key);
+    if (wsId != null) await rerenderWs(wsId).catch(() => {}); else await refreshHouse().catch(() => {});
+    if (sel) state.panes[state.focused]?.view.select(sel);
+    renderUndo();
+  }
+}
+async function proposeAsCurrent(wsId) {
+  const ws = state.cache.get(wsId);
+  if (!confirm(`Make “${ws?.name ?? wsName(wsId)}” Current's furniture?\n\nThis files a proposal (nothing changes yet). Approving it in Proposals makes the pieces marked existing or keep, and this design's colors, what Current has in these rooms now. Current's old pieces there are replaced. Pieces marked new, replace or remove are left out. This workspace isn't changed. You can roll Current back from its History.\n\nTip: approve or reject this workspace's other pending proposals first, so they're included.`)) return;
+  try {
+    const p = await api.proposeAsCurrent(wsId);
+    toast(`Filed proposal #${p.id}. Review and approve it in Proposals.`);
+    $('propFilter').value = 'pending';
+    if (state.drawer !== 'proposals') openDrawer('proposals'); else renderProposals();
+  } catch (e) { toast(errMsg(e), true); }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 for (const c of CATALOG) {
@@ -576,6 +693,8 @@ $('customForm').addEventListener('submit', (e) => {
 });
 const fv = () => state.panes[state.focused]?.view;
 $('btnRotate').onclick = () => fv()?.rotateSelected();
+$('btnUndo').onclick = () => undoStep('undo');
+$('btnRedo').onclick = () => undoStep('redo');
 function deleteSelected() {
   const p = state.selection, wsId = focusedWs();
   if (!p || wsId == null || !state.editable) return;
@@ -615,6 +734,8 @@ $('btnExport').onclick = () => {
 };
 $('toggleSidebar').onclick = () => $('sidebar').classList.toggle('collapsed');
 window.addEventListener('keydown', (e) => {
+  const step = shortcutFor(e, document.activeElement);
+  if (step) { e.preventDefault(); undoStep(step); return; }
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
   if (e.key === 'r' || e.key === 'R') fv()?.rotateSelected();
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selection) { e.preventDefault(); deleteSelected(); }
@@ -789,7 +910,7 @@ async function renderCurrentHistory() {
   let revs;
   try { revs = await api.currentHistory(); } catch (e) { body.innerHTML = `<p class="muted">${esc(errMsg(e))}</p>`; return; }
   const latest = revs[0]?.number ?? 0;
-  body.innerHTML = '<p class="muted small">Current changes only through promoted scans, measurements and rollbacks. Rolling back adds a new revision; pinned values are kept.</p>' + revs.map((r) => {
+  body.innerHTML = '<p class="muted small">Current changes only through promoted scans, measurements, proposals you approve (furniture and colors) and rollbacks. Rolling back adds a new revision; pinned values are kept.</p>' + revs.map((r) => {
     const rows = r.changes.filter((c) => c.field && c.field !== 'measurementStatus').slice(0, 40).map((c) =>
       `<div>${esc(c.op)} ${esc(c.entityType.replace('_', ' '))} #${c.entityId} · ${esc(c.field)}: ${c.op === 'create' ? '' : `<span class="before">${esc(fmtVal(c.field, c.before))}</span> → `}${c.op === 'delete' ? '' : `<span class="after">${esc(fmtVal(c.field, c.after))}</span>`}</div>`).join('');
     return `<div class="rev-row"><div><b>Revision ${r.number}</b> <span class="k">${esc(r.kind)}</span> · ${esc(r.agent ?? r.actor)} · ${when(r.createdAt)}</div>

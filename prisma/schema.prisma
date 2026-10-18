@@ -309,6 +309,7 @@ model Measurement {
   recordedAt DateTime          @default(now()) @map("recorded_at")
   note       String?           @db.VarChar(500)
   unpinnedAt DateTime?         @map("unpinned_at") // set when a pin (source=manual, isOverride) is released
+  withdrawnAt DateTime?        @map("withdrawn_at") // undone in the editor: kept for the record, no longer counts
 
   upload Upload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
 
@@ -463,7 +464,8 @@ model Proposal {
   sourceUrl         String?            @map("source_url") @db.VarChar(1000)
   sourceImageUrl    String?            @map("source_image_url") @db.VarChar(1000)
   inspirationId     Int?               @map("inspiration_id")
-  targetWorkspaceId Int?               @map("target_workspace_id") // NULL = new workspace
+  targetWorkspaceId Int?               @map("target_workspace_id") // NULL = new workspace (or Current, see targetCurrent)
+  targetCurrent     Boolean            @default(false) @map("target_current") // furniture/colors of Current (approved by Michael)
   baseWorkspaceId   Int?               @map("base_workspace_id") // new workspace: copied from this one
   newWorkspaceName  String?            @map("new_workspace_name") @db.VarChar(120)
   title             String             @db.VarChar(200)
@@ -1006,9 +1008,10 @@ model FurnitureModel {
 }
 
 /// Colors for a room within one workspace (works for Current rooms a workspace links, and drafts).
+/// workspace_id NULL = the colors the room has now (Current; changed only by approved proposals).
 model RoomStyle {
   id              Int     @id @default(autoincrement())
-  workspaceId     Int     @map("workspace_id")
+  workspaceId     Int?    @map("workspace_id")
   roomId          Int     @map("room_id")
   wallColorName   String? @map("wall_color_name") @db.VarChar(60)
   wallColor       String? @map("wall_color") @db.VarChar(9)
@@ -1019,8 +1022,8 @@ model RoomStyle {
   deviceColorName String? @map("device_color_name") @db.VarChar(60) // outlets and switches
   deviceColor     String? @map("device_color") @db.VarChar(9)
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  room      Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@unique([workspaceId, roomId])
   @@map("room_styles")

@@ -28,7 +28,12 @@ const cushions = (d: number): Param => ({ key: 'cushionCount', label: 'Seat cush
 export const TEMPLATES: TemplateDef[] = [
   { slug: 'l_sectional', name: 'L-sectional', kind: 'sectional', w: 112, d: 86, h: 32, categories: ['sofa'],
     params: [arms, { key: 'chaiseSide', label: 'Chaise side', type: 'choice', default: 'right', options: [['left', 'Left'], ['right', 'Right']] },
-      { key: 'chaiseDepthIn', label: 'Chaise length (in)', type: 'number', default: 66, min: 40, max: 120 }, seatDepth, cushions(3), fabric, legStyle, legHeight] },
+      { key: 'chaiseDepthIn', label: 'Chaise length (in)', type: 'number', default: 66, min: 40, max: 120 },
+      { key: 'chaiseWidthIn', label: 'Chaise width (in, 0 = seat depth)', type: 'number', default: 0, min: 0, max: 80 },
+      { key: 'ottomanSide', label: 'Attached ottoman', type: 'choice', default: 'none', options: [['none', 'None'], ['left', 'Left end'], ['right', 'Right end']] },
+      { key: 'ottomanWidthIn', label: 'Ottoman width (in)', type: 'number', default: 36, min: 12, max: 80 },
+      { key: 'ottomanDepthIn', label: 'Ottoman depth (in)', type: 'number', default: 30, min: 12, max: 60 },
+      seatDepth, cushions(3), fabric, legStyle, legHeight] },
   { slug: 'sofa', name: 'Sofa', kind: 'sofa', w: 84, d: 36, h: 32, categories: ['sofa'], params: [arms, seatDepth, cushions(3), fabric, legStyle, legHeight, wood] },
   { slug: 'armchair', name: 'Armchair', kind: 'chair', w: 32, d: 34, h: 32, categories: ['chair', 'sofa'], params: [arms, fabric, legStyle, legHeight, wood] },
   { slug: 'swivel_chair', name: 'Swivel chair', kind: 'chair', w: 32, d: 34, h: 30, categories: ['chair'],

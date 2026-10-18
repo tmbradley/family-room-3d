@@ -29,18 +29,18 @@ export function weakestSource(sources: Source[]): Source {
 }
 
 export type MeasurementRow = {
-  field: string; valueIn: number; source: Source; isOverride: boolean; recordedAt: Date; id: number; unpinnedAt?: Date | null;
+  field: string; valueIn: number; source: Source; isOverride: boolean; recordedAt: Date; id: number; unpinnedAt?: Date | null; withdrawnAt?: Date | null;
 };
 /** A pin is a manual override that hasn't been released. */
 export const isPin = (m: MeasurementRow) => m.isOverride && m.source === 'manual' && !m.unpinnedAt;
 
 /**
  * Effective value per field: newest active pin/override > newest of measured/scan/manual > newest manual_estimate.
- * Scans and estimates can never beat an active pin.
+ * Scans and estimates can never beat an active pin. Withdrawn rows (undone in the editor) don't count.
  */
 export function effective(ms: MeasurementRow[]) {
   const byField = new Map<string, MeasurementRow[]>();
-  for (const m of ms) byField.set(m.field, [...(byField.get(m.field) ?? []), m]);
+  for (const m of ms) if (!m.withdrawnAt) byField.set(m.field, [...(byField.get(m.field) ?? []), m]);
   const out: Record<string, { valueIn: number; source: Source; override: boolean; pinned: boolean; history: number }> = {};
   for (const [field, list] of byField) {
     const newest = (xs: MeasurementRow[]) => [...xs].sort((a, b) => +b.recordedAt - +a.recordedAt || b.id - a.id)[0];
