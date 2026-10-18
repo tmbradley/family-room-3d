@@ -13,7 +13,7 @@ const savePrefs = () => localStorage.setItem(LS.prefs, JSON.stringify(prefs));
 const state = {
   me: null, editable: false, house: null, workspaces: [], cache: new Map(), previews: new Map(),
   openTabs: JSON.parse(localStorage.getItem(LS.tabs) || 'null'), panes: [], focused: 0,
-  drawer: null, proposals: [], selection: null,
+  drawer: null, proposals: [], selection: null, scans: [], scanPreviews: new Map(), scanReview: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -31,6 +31,8 @@ const when = (d) => new Date(d).toLocaleString([], { month: 'short', day: 'numer
 const wsName = (id) => state.workspaces.find((w) => w.id === id)?.name ?? `Workspace ${id}`;
 const keyWs = (key) => (key?.startsWith('ws:') ? Number(key.slice(3)) : null);
 const keyPv = (key) => (key?.startsWith('pv:') ? Number(key.slice(3)) : null);
+const keySc = (key) => (key?.startsWith('sc:') ? Number(key.slice(3)) : null);
+const currentData = () => ({ id: null, name: 'Current', revision: state.house.current.revision, units: 'in', rooms: state.house.current.rooms });
 const saveTabs = () => localStorage.setItem(LS.tabs, JSON.stringify(state.openTabs));
 function errMsg(e) { return e instanceof ApiError ? e.body?.message || e.body?.error || e.message : e?.message || String(e); }
 
@@ -88,10 +90,12 @@ function focusPane(i) {
 
 async function show(i, key) {
   const pane = state.panes[i]; pane.key = key;
-  const wsId = keyWs(key), pvId = keyPv(key);
+  const wsId = keyWs(key), pvId = keyPv(key), scId = keySc(key);
   let data, editable = false, highlight = [];
   try {
-    if (wsId != null) { data = await loadWs(wsId); editable = state.editable; }
+    if (key === 'cur') { if (!state.house?.hasCurrent) return; data = currentData(); }
+    else if (scId != null) { data = state.scanPreviews.get(scId)?.preview; if (!data) return; }
+    else if (wsId != null) { data = await loadWs(wsId); editable = state.editable; }
     else if (pvId != null) {
       if (!state.previews.has(pvId)) state.previews.set(pvId, await api.preview(pvId));
       data = state.previews.get(pvId); highlight = data.preview.changedEntities;
@@ -102,10 +106,11 @@ async function show(i, key) {
   pane.view.setData(data, { editable, highlight });
   const head = pane.el.querySelector('.pane-head');
   head.querySelector('.name').textContent = pvId != null ? `Preview: proposal #${pvId} · ${data.preview.title}` : data.name;
-  head.querySelector('.rev').textContent = pvId != null ? '' : `rev ${data.revision}`;
+  head.querySelector('.rev').textContent = pvId != null || scId != null ? '' : `rev ${data.revision}`;
   const tools = head.querySelector('.tools');
-  tools.innerHTML = pvId != null
+  tools.innerHTML = pvId != null || scId != null
     ? `<span class="chip">preview, not saved</span>`
+    : key === 'cur' ? `<span class="chip ro">locked: scans, measurements, rollback</span>`
     : editable ? '' : `<span class="chip ro">read-only</span>`;
   if (state.panes.length > 1 && i === 1) {
     const x = document.createElement('button'); x.textContent = '✕'; x.title = 'Close split'; x.onclick = (e) => { e.stopPropagation(); setSplit(false); };
@@ -146,7 +151,7 @@ function syncFrom(src, force = false) {
 // ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
-const tabKeys = () => [...state.openTabs.map((id) => `ws:${id}`), ...[...state.previews.keys()].map((id) => `pv:${id}`)];
+const tabKeys = () => [...(state.house?.hasCurrent ? ['cur'] : []), ...state.openTabs.map((id) => `ws:${id}`), ...[...state.previews.keys()].map((id) => `pv:${id}`), ...[...state.scanPreviews.keys()].map((id) => `sc:${id}`)];
 function renderTabs() {
   const tabs = $('tabs'); tabs.innerHTML = '';
   const cur = document.createElement('div');
@@ -157,24 +162,26 @@ function renderTabs() {
   const shown = new Set(state.panes.map((p) => p.key));
   for (const key of tabKeys()) {
     const t = document.createElement('div');
-    const wsId = keyWs(key), pvId = keyPv(key);
-    t.className = 'tab' + (pvId != null ? ' preview' : '') + (state.panes[state.focused]?.key === key ? ' active' : shown.has(key) ? ' shown' : '');
+    const wsId = keyWs(key), pvId = keyPv(key), scId = keySc(key);
+    t.className = 'tab' + (pvId != null || scId != null ? ' preview' : '') + (state.panes[state.focused]?.key === key ? ' active' : shown.has(key) ? ' shown' : '');
     t.setAttribute('role', 'tab');
-    const label = wsId != null ? wsName(wsId) : `Preview #${pvId}`;
-    t.innerHTML = `<span class="t">${esc(label)}</span><span class="x" title="Close tab">✕</span>`;
+    const label = key === 'cur' ? 'Current' : wsId != null ? wsName(wsId) : scId != null ? `Scan #${scId}` : `Preview #${pvId}`;
+    t.innerHTML = `<span class="t">${esc(label)}</span>${key === 'cur' ? '' : '<span class="x" title="Close tab">✕</span>'}`;
     t.title = wsId != null && state.editable ? 'Double-click to rename' : label;
     t.onclick = (e) => { if (e.target.classList.contains('x')) return; show(state.focused, key); };
     t.ondblclick = () => wsId != null && renameWs(wsId);
-    t.querySelector('.x').onclick = (e) => { e.stopPropagation(); closeTab(key); };
+    t.querySelector('.x')?.addEventListener('click', (e) => { e.stopPropagation(); closeTab(key); });
     tabs.appendChild(t);
   }
 }
 function closeTab(key) {
-  const wsId = keyWs(key), pvId = keyPv(key);
-  if (wsId != null) {
+  const wsId = keyWs(key), pvId = keyPv(key), scId = keySc(key);
+  if (key === 'cur') return;
+  if (scId != null) state.scanPreviews.delete(scId);
+  else if (wsId != null) {
     if (state.openTabs.length <= 1 && !state.previews.size) return toast('Keep at least one tab open');
     state.openTabs = state.openTabs.filter((id) => id !== wsId); saveTabs();
-  } else state.previews.delete(pvId);
+  } else if (pvId != null) state.previews.delete(pvId);
   state.panes.forEach((p, i) => {
     if (p.key === key) {
       const next = tabKeys()[0];
@@ -289,7 +296,8 @@ function renderSelection() {
 function measRow(entityType, entityId, field, label, value, m) {
   const src = m?.[field];
   const pinned = !!src?.pinned;
-  const can = state.editable && keyWs(state.panes[state.focused]?.key) != null;
+  const key = state.panes[state.focused]?.key;
+  const can = state.editable && (keyWs(key) != null || key === 'cur');
   return `<div class="meas" data-et="${entityType}" data-id="${entityId}" data-field="${field}">
     <span>${esc(label)}<span class="src ${src?.source ?? 'manual_estimate'}">${pinned ? 'pinned' : esc((src?.source ?? 'estimate').replace('manual_estimate', 'estimate'))}</span></span>
     <input type="number" step="1" min="0" value="${value ?? ''}" ${can && !pinned ? '' : 'disabled'} aria-label="${esc(label)} in inches">
@@ -334,6 +342,7 @@ async function measure(btn) {
       toast(r.applied ? (btn.dataset.act === 'pin' ? `Pinned at ${fmtIn(valueIn)}. Scans and estimates won't change it.` : `Saved ${fmtIn(valueIn)} as measured`) : `Recorded, but the pinned value (${fmtIn(r.effective.valueIn)}) still wins`);
     }
     const sel = state.selection?.id;
+    if (state.panes[state.focused]?.key === 'cur') { await refreshHouse(); return; }
     await rerenderWs(wsId);
     if (sel) state.panes[state.focused].view.select(sel);
   } catch (e) { toast(errMsg(e), true); }
@@ -342,7 +351,8 @@ async function measure(btn) {
 // ---------------------------------------------------------------------------
 // Drawer: proposals and history
 // ---------------------------------------------------------------------------
-function openDrawer(kind) {
+function openDrawer(kind, scanId) {
+  if (kind === 'scan' && scanId != null) state.scanReview = scanId;
   state.drawer = state.drawer === kind ? null : kind;
   $('drawer').hidden = !state.drawer;
   $('btnProposals').classList.toggle('active', state.drawer === 'proposals');
@@ -350,6 +360,7 @@ function openDrawer(kind) {
   $('propFilter').hidden = state.drawer !== 'proposals';
   if (state.drawer === 'proposals') renderProposals();
   if (state.drawer === 'history') renderHistory();
+  if (state.drawer === 'scan') renderScanReview(state.scanReview);
   window.dispatchEvent(new Event('resize'));
 }
 function diffRow(c) {
@@ -422,6 +433,7 @@ async function proposalAction(id, act) {
   } catch (e) { toast(errMsg(e), true); }
 }
 async function renderHistory() {
+  if (state.panes[state.focused]?.key === 'cur') return renderCurrentHistory();
   const wsId = focusedWs();
   $('drawerTitle').textContent = wsId != null ? `History · ${wsName(wsId)}` : 'History';
   const body = $('drawerBody');
@@ -497,6 +509,7 @@ $('btnNew').onclick = (e) => { e.stopPropagation(); renderNewMenu(); $('newMenu'
 document.addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) $('newMenu').hidden = true; });
 $('btnProposals').onclick = () => openDrawer('proposals');
 $('btnHistory').onclick = () => openDrawer('history');
+$('btnPairPhone').onclick = showPairDialog;
 $('drawerClose').onclick = () => openDrawer(state.drawer);
 $('propFilter').onchange = renderProposals;
 $('btnExport').onclick = () => {
@@ -537,9 +550,13 @@ async function boot() {
   setWalls(prefs.walls);
   state.panes.push(makePane(0));
   const first = Number(params.get('ws')) || state.openTabs[0];
-  if (first) await openTab(first, 0);
+  if (params.get('ws') === 'cur' && state.house.hasCurrent) await show(0, 'cur');
+  else if (first) await openTab(first, 0);
   else { $('panes').innerHTML = '<p class="muted" style="padding:20px">No workspaces yet.</p>'; }
   await refreshProposals().catch(() => {});
+  $('btnPairPhone').disabled = !state.editable;
+  if (!state.editable) $('btnPairPhone').title = 'Only Michael can pair a phone (passkey session)';
+  await refreshScans();
   const split = params.get('split');
   if (split) {
     if (split.startsWith('pv:')) { await openDrawerSilently(); await previewProposal(Number(split.slice(3))); }
@@ -548,7 +565,138 @@ async function boot() {
   if (params.get('drawer')) openDrawer(params.get('drawer'));
   flushDrafts();
 }
+
+// ---------------------------------------------------------------------------
+// Pairing and scans
+// ---------------------------------------------------------------------------
+function modal(html) {
+  const m = document.createElement('div'); m.className = 'modal';
+  m.innerHTML = `<div class="modal-content">${html}</div>`;
+  m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-close]')) m.remove(); });
+  document.body.appendChild(m);
+  return m;
+}
+async function qrSvg(text) {
+  try {
+    const QR = (await import('https://cdn.jsdelivr.net/npm/qrcode@1.5.4/+esm')).default;
+    return await QR.toString(text, { type: 'svg', margin: 1, width: 220 });
+  } catch { return ''; } // offline: the code and link below still work
+}
+function showPairDialog() {
+  if (!state.editable) return toast('Only Michael can pair a phone (sign in with your passkey)', true);
+  const rooms = state.house?.current?.rooms ?? [];
+  const m = modal(`<h2>Pair phone</h2>
+    <p class="small">The code works for one scan, from one phone, for 60 minutes. The scan waits here for your review; nothing changes Current until you promote it.</p>
+    <label>What are you scanning?
+      <select id="pairScope">
+        <option value="new">A new room</option>
+        ${rooms.map((r) => `<option value="${r.id}">Rescan ${esc(r.label)} (Current)</option>`).join('')}
+      </select>
+    </label>
+    <label id="pairLabelRow">Room name <input id="pairLabel" value="Family room" maxlength="120"></label>
+    <div class="row"><button id="pairGo" class="primary">Create code</button><button data-close>Cancel</button></div>`);
+  const scope = m.querySelector('#pairScope');
+  scope.onchange = () => (m.querySelector('#pairLabelRow').hidden = scope.value !== 'new');
+  m.querySelector('#pairGo').onclick = async () => {
+    const body = scope.value === 'new' ? { newRoom: true, label: m.querySelector('#pairLabel').value.trim() } : { roomId: Number(scope.value) };
+    let r;
+    try { r = await api.pairPhone(body); } catch (e) { return toast(errMsg(e), true); }
+    const url = `${location.origin}/scan?token=${encodeURIComponent(r.token)}`;
+    const svg = await qrSvg(url);
+    m.querySelector('.modal-content').innerHTML = `<h2>Scan with your iPhone</h2>
+      <p class="small">Point the iPhone camera at the code to open the Scan Room App Clip, or type the code in the clip.</p>
+      ${svg ? `<div style="text-align:center">${svg}</div>` : ''}
+      <div class="code-box">${esc(r.token)}</div>
+      <p class="small">Scanning: <b>${esc(r.roomLabel)}</b> · expires ${when(r.expiresAt)}<br><a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></p>
+      <div class="row"><button data-close>Done</button></div>`;
+  };
+}
+async function refreshScans() {
+  const el = $('scanImports');
+  try { state.scans = await api.scans('pending'); } catch (e) { el.innerHTML = `<div class="muted">${esc(errMsg(e))}</div>`; return; }
+  el.innerHTML = state.scans.length
+    ? state.scans.map((s) => `<div class="scan-item"><strong>${esc(s.label)}</strong>
+        <span class="muted">${s.room ? `Rescan of ${esc(s.room.label)}` : 'New room'} · ${when(s.createdAt)} · ${s.files} file(s)</span>
+        <div class="row"><button data-scan="${s.id}">Review</button></div></div>`).join('')
+    : '<div class="muted">No scans waiting for review.</div>';
+  el.querySelectorAll('button[data-scan]').forEach((b) => (b.onclick = () => reviewScan(Number(b.dataset.scan))));
+}
+async function reviewScan(id) {
+  let scan;
+  try { scan = await api.scan(id); } catch (e) { return toast(`Couldn't load scan: ${errMsg(e)}`, true); }
+  state.scanPreviews.set(id, scan);
+  if (state.house?.hasCurrent) await show(0, 'cur');
+  if (state.panes.length < 2) setSplit(true, `sc:${id}`); else await show(1, `sc:${id}`);
+  state.drawer = null; openDrawer('scan', id);
+}
+function renderScanReview(id) {
+  const scan = state.scanPreviews.get(id), body = $('drawerBody');
+  $('drawerTitle').textContent = 'Review scan';
+  if (!scan) { body.innerHTML = '<p class="muted">Scan not loaded.</p>'; return; }
+  const s = scan.parsed;
+  const can = state.editable && scan.status === 'pending';
+  body.innerHTML = `<div class="card">
+    <div class="meta"><span class="status ${scan.status}">${scan.status}</span> #${scan.id} · ${when(scan.createdAt)}</div>
+    <h3>${esc(scan.label)}</h3>
+    <div class="meta">${scan.room ? `Rescan of Current room “${esc(scan.room.label)}”` : 'Creates a new Current room'}</div>
+    <p>${fmtIn(s.widthIn)} × ${fmtIn(s.depthIn)} · ceiling ${fmtIn(s.ceilingIn)} · ${s.walls.length} walls · ${s.openings.length} doors/windows/openings · ${s.objects.length} objects (not imported)</p>
+    <p class="small muted">Promoting writes one revision to Current and records every scanned value as a measurement. Pinned measurements always win. You can roll it back from Current's history.</p>
+    <div class="actions">${can ? `<button data-act="promote" class="approve">Promote to Current</button><button data-act="reject" class="danger">Reject</button>` : ''}</div>
+  </div>`;
+  body.querySelectorAll('button[data-act]').forEach((b) => (b.onclick = () => scanAction(id, b.dataset.act)));
+}
+async function scanAction(id, act) {
+  const scan = state.scanPreviews.get(id);
+  try {
+    if (act === 'promote') {
+      if (!confirm(`Promote “${scan.label}” to Current?`)) return;
+      const r = await api.promoteScan(id);
+      toast(`Promoted as Current revision ${r.revision}${r.kept?.length ? ` · kept ${r.kept.length} pinned/used value(s)` : ''}.`);
+    } else {
+      const note = prompt(`Reject “${scan.label}”? Optional reason:`, '');
+      if (note === null) return;
+      await api.rejectScan(id, note || undefined);
+      toast('Scan rejected. Kept for the record; nothing changed.');
+    }
+    closeTab(`sc:${id}`);
+    await refreshHouse();
+    if (act === 'promote') await show(0, 'cur');
+    if (state.drawer === 'scan') openDrawer('scan'); // closes the review drawer
+    await refreshScans();
+  } catch (e) { toast(errMsg(e), true); }
+}
+async function refreshHouse() {
+  state.house = await api.house();
+  $('houseStatus').hidden = !!state.house.hasCurrent;
+  for (let i = 0; i < state.panes.length; i++) if (state.panes[i].key === 'cur') await show(i, 'cur');
+  renderTabs();
+}
+async function renderCurrentHistory() {
+  $('drawerTitle').textContent = 'History · Current';
+  const body = $('drawerBody');
+  let revs;
+  try { revs = await api.currentHistory(); } catch (e) { body.innerHTML = `<p class="muted">${esc(errMsg(e))}</p>`; return; }
+  const latest = revs[0]?.number ?? 0;
+  body.innerHTML = '<p class="muted small">Current changes only through promoted scans, measurements and rollbacks. Rolling back adds a new revision; pinned values are kept.</p>' + revs.map((r) => {
+    const rows = r.changes.filter((c) => c.field && c.field !== 'measurementStatus').slice(0, 40).map((c) =>
+      `<div>${esc(c.op)} ${esc(c.entityType.replace('_', ' '))} #${c.entityId} · ${esc(c.field)}: ${c.op === 'create' ? '' : `<span class="before">${esc(fmtVal(c.field, c.before))}</span> → `}${c.op === 'delete' ? '' : `<span class="after">${esc(fmtVal(c.field, c.after))}</span>`}</div>`).join('');
+    return `<div class="rev-row"><div><b>Revision ${r.number}</b> <span class="k">${esc(r.kind)}</span> · ${esc(r.agent ?? r.actor)} · ${when(r.createdAt)}</div>
+      <div class="muted small">${esc(r.note ?? '')}</div>
+      ${rows ? `<details><summary>${r.changeCount} change rows</summary>${rows}</details>` : ''}
+      ${state.editable && r.number < latest && r.number >= 1 ? `<button data-rb="${r.number}">Roll back to here</button>` : ''}</div>`;
+  }).join('');
+  body.querySelectorAll('button[data-rb]').forEach((b) => (b.onclick = async () => {
+    const n = Number(b.dataset.rb);
+    if (!confirm(`Roll Current back to revision ${n}?\n\nThis adds a new revision that undoes everything after ${n}. Pinned measurements are kept.`)) return;
+    try {
+      const r = await api.rollbackCurrent(n);
+      toast(`Rolled back. Current is now at revision ${r.revision}${r.skipped?.length ? ` (kept ${r.skipped.length} pinned/used value(s))` : ''}.`);
+      await refreshHouse(); renderCurrentHistory();
+    } catch (e) { toast(errMsg(e), true); }
+  }));
+}
+
 async function openDrawerSilently() { state.proposals = await api.proposals(); }
 boot();
 
-window.housePlanner = { state, show, setSplit, syncFrom, openDrawer, previewProposal };
+window.housePlanner = { state, show, setSplit, syncFrom, openDrawer, previewProposal, showPairDialog, reviewScan };

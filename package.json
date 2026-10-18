@@ -13,11 +13,12 @@
     "seed": "tsx scripts/seed.ts",
     "setup-code": "tsx scripts/create-setup-code.ts",
     "agent-key": "tsx scripts/create-agent-key.ts",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --import tsx --import ./tests/setup.ts --test --test-concurrency=1 tests/*.test.ts",
     "db:predeploy": "tsx scripts/predeploy.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
     "@hono/node-server": "^1.19.17",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@prisma/client": "^6.19.3",

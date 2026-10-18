@@ -2,19 +2,11 @@
  * P1 tests: proposal apply / reject / stale / rollback, pin protection, new-workspace proposals,
  * auth scopes, and the MCP endpoint. Needs a throwaway MySQL database:
  *   TEST_DATABASE_URL=mysql://user:pass@127.0.0.1:3306/hp_test npm test
- * The database is reset (all data dropped) at the start.
+ * tests/setup.ts and tests/helpers.ts refuse anything but an empty or suite-marked test database.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
-
-const url = process.env.TEST_DATABASE_URL;
-if (!url) throw new Error('Set TEST_DATABASE_URL to a throwaway MySQL database (it gets reset)');
-if (/railway|rlwy/.test(url)) throw new Error('Refusing to run tests against a Railway database');
-process.env.DATABASE_URL = url;
-process.env.DISABLE_EXPORT_SCHEDULER = '1';
-
-const { prisma } = await import('../server/db.js');
+const { prisma, prepareTestDb } = await import('./helpers.js');
 const { seedHouse } = await import('../server/seed.js');
 const { createProposal, approveProposal, rejectProposal, previewProposal } = await import('../server/proposals.js');
 const { saveChanges, rollbackWorkspace, getHistory } = await import('../server/changes.js');
@@ -52,8 +44,7 @@ const propose = (changes: any[], extra: any = {}) =>
   createProposal({ title: 'Test proposal', rationale: 'because', workspaceId: W, roomIds: [roomId], source: { kind: 'bot' }, changes, cost, ...extra }, { actor: 'agent' });
 
 before(async () => {
-  execSync('npx prisma migrate deploy', { env: { ...process.env, DATABASE_URL: url }, stdio: 'pipe' });
-  if ((await prisma.house.count()) > 0) throw new Error('TEST_DATABASE_URL must point at an empty database');
+  await prepareTestDb();
   await seedHouse(prisma as any, fixture);
   W = (await prisma.workspace.findFirstOrThrow()).id;
   roomId = (await prisma.room.findFirstOrThrow()).id;

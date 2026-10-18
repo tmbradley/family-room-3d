@@ -34,17 +34,24 @@ Where this is headed: [PLAN.md](PLAN.md).
   - `entities.ts` what a change may touch (field registry), `changes.ts` the change engine, revisions, rollback
   - `workspaces.ts` views and copies, `proposals.ts` proposals, `measurements.ts` measurements and pins
   - `mcp.ts` MCP server at `/mcp`; `house.ts`, `export.ts`, `seed.ts`, `bootstrap.ts`
+  - `uploads.ts` phone pairing codes and presigned uploads, `scans.ts` RoomPlan parser, scan review and promote to Current
+- `ios/`: parent app + "Scan Room" App Clip (RoomPlan); build on a Mac, see `ios/README.md` and `SCAN_SETUP.md`
+- `fixtures/`: RoomPlan `CapturedRoom` sample + generator used by the tests
 - `prisma/`: fully relational MySQL schema and migrations
 - `scripts/`: `predeploy.ts` (runs on every start: table snapshot to the bucket, then `prisma migrate deploy`),
   `seed.ts`, `create-setup-code.ts`, `create-agent-key.ts`
-- `tests/`: `npm test` (needs `TEST_DATABASE_URL` pointing at a new, empty MySQL database)
+- `tests/`: `npm test` (runs only against `TEST_DATABASE_URL`: a new, empty MySQL database whose name contains "test")
 
 ## API (session cookie, or `Authorization: Bearer <agent key>` for reads and proposals)
 
 `GET /health` · `GET /api/house` · `GET /api/workspaces[/:id]` · `GET /api/workspaces/:id/history` ·
 `GET /api/rooms/:id` · `GET /api/proposals[?status=]` · `GET /api/proposals/:id[/preview]` · `POST /api/proposals` (propose scope) ·
 Michael only: `POST /api/workspaces`, `/api/workspaces/:id/changes`, `/api/workspaces/:id/rollback`,
-`/api/proposals/:id/approve|reject`, `/api/measurements`, `/api/measurements/unpin`.
+`/api/proposals/:id/approve|reject`, `/api/measurements`, `/api/measurements/unpin`,
+`/api/upload-tokens` (pair phone), `/api/scans/:id/promote|reject`, `/api/current/rollback`.
+Read: `GET /api/scans[/:id]`, `GET /api/current/history`. Pairing code only (App Clip): `/api/upload-tokens/validate`,
+`/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`. Current changes only through promoted scans,
+measurements and rollbacks.
 MCP: `POST /mcp` (see PLAN.md section 10).
 
 House data is never committed here. The seed comes from the private `tmbradley/house-data` repo.

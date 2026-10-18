@@ -61,9 +61,16 @@ export const ENTITIES: Record<EntityType, Def> = {
     },
   },
   room: {
+    // Changes can only edit draft rooms. Current rooms are created/updated only by a promoted scan
+    // (trusted internal caller) and by rollbacks of those revisions; see server/changes.ts.
     model: 'room', label: 'Room (draft rooms only)', create: false, delete: false, pinnable: ['ceilingIn'],
-    required: [],
+    required: ['houseId', 'slug', 'label', 'ceilingIn'],
     fields: {
+      houseId: { type: 'int', system: true }, slug: { type: 'str', max: 60, system: true },
+      draftWorkspaceId: { type: 'int', nullable: true, system: true },
+      floorMaterial: { type: 'str', nullable: true, max: 80, system: true }, floorFinish: { type: 'str', nullable: true, max: 80, system: true },
+      floorKeep: { type: 'bool', system: true },
+      measurementStatus: { type: 'enum', values: SRC, system: true },
       label: { type: 'str', max: 120 }, ceilingIn: inches(1, 600),
       originXIn: inches(), originYIn: inches(), rotationDeg: { type: 'int', min: 0, max: 359 },
       floorColor: color, wallColorName: { type: 'str', nullable: true, max: 60 }, wallColor: color,
