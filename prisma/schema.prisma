@@ -237,6 +237,7 @@ model Wall {
   room     Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
   openings Opening[]
   fixtures Fixture[]
+  styles   WallStyle[]
   linksA   RoomLink[] @relation("wallA")
   linksB   RoomLink[] @relation("wallB")
 
@@ -274,10 +275,14 @@ model Fixture {
   count             Int               @default(1)
   notes             String?           @db.VarChar(500)
   measurementStatus MeasurementSource @default(manual_estimate) @map("measurement_status")
+  /// Set = a design's own fixture in a Current room it links (NULL = Current's, or a draft room's own).
+  workspaceId       Int?              @map("workspace_id")
 
-  room Room  @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  wall Wall? @relation(fields: [wallId], references: [id], onDelete: SetNull)
+  room      Room       @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  wall      Wall?      @relation(fields: [wallId], references: [id], onDelete: SetNull)
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
+  @@index([workspaceId])
   @@map("fixtures")
 }
 
@@ -340,6 +345,8 @@ model Workspace {
   structureOverrides StructureOverride[]
   placements         Placement[]
   targetedBy         Proposal[]           @relation("target")
+  fixtures           Fixture[]
+  wallStyles         WallStyle[]
   baseFor            Proposal[]           @relation("baseFor")
   revisions          Revision[]
   costEstimates      CostEstimate[]
@@ -934,11 +941,50 @@ model FurnitureTemplate {
   defaultDIn Int    @map("default_d_in")
   defaultHIn Int    @map("default_h_in")
 
+  groupKey       String  @default("furniture") @map("group_key") @db.VarChar(40)
+  /// floor | wall (hung on a wall at a height) | ceiling | surface (sits on furniture) | soft (on a seat)
+  mount          String  @default("floor") @db.VarChar(20)
+  priceLowCents  Int?    @map("price_low_cents") // typical price range, used when the item has no price
+  priceHighCents Int?    @map("price_high_cents")
+  description    String? @db.VarChar(300)
+  sort           Int     @default(0)
+
+  group      TemplateGroup      @relation(fields: [groupKey], references: [key])
   params     TemplateParam[]
   categories TemplateCategory[]
   placements Placement[]
 
   @@map("furniture_templates")
+}
+
+/// Sections of the Add furniture menu (Furniture, Lighting, Wall decor, Soft goods and plants).
+model TemplateGroup {
+  key   String @id @db.VarChar(40)
+  label String @db.VarChar(80)
+  sort  Int    @default(0)
+
+  templates FurnitureTemplate[]
+
+  @@map("template_groups")
+}
+
+/// Color and finish of one wall in a workspace (an accent wall, limewash). workspace_id NULL = Current.
+/// Wins over the room's wall color for that wall.
+model WallStyle {
+  id          Int     @id @default(autoincrement())
+  workspaceId Int?    @map("workspace_id")
+  wallId      Int     @map("wall_id")
+  colorName   String? @map("color_name") @db.VarChar(60)
+  color       String? @db.VarChar(9)
+  finish      String  @default("paint") @db.VarChar(20) // paint | limewash
+  notes       String? @db.VarChar(500)
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  wall      Wall       @relation(fields: [wallId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, wallId])
+  @@index([wallId])
+  @@map("wall_styles")
 }
 
 /// RoomPlan object categories a template can stand in for.

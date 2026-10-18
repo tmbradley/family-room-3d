@@ -12,10 +12,11 @@ import { copyWorkspace, getCurrentView, getWorkspaceView } from './workspaces.js
 import { prisma } from './db.js';
 import { listPhotos } from './photos.js';
 import { recordMeasurement } from './measurements.js';
+import { estimateOps } from './costs.js';
 
 export const COST_STEPS = ['paint', 'outlets', 'lighting', 'window', 'furniture', 'rug', 'decor', 'other'] as const;
 
-const entityType = z.enum(['placement', 'placement_param', 'room_style', 'furniture_item', 'room', 'wall', 'opening', 'fixture', 'workspace']);
+const entityType = z.enum(['placement', 'placement_param', 'room_style', 'wall_style', 'furniture_item', 'room', 'wall', 'opening', 'fixture', 'workspace']);
 export const changeSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('update'), entityType, entityId: z.number().int(), field: z.string(), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }),
   z.object({
@@ -242,6 +243,7 @@ async function labelFor(entityType: string, id: number | null): Promise<string |
     case 'room': return (await prisma.room.findUnique({ where: { id } }))?.label ?? null;
     case 'placement_param': { const pp = await prisma.placementParam.findUnique({ where: { id }, include: { placement: { include: { item: true } } } }); return pp ? `${pp.placement.item.name} · ${pp.key}` : null; }
     case 'room_style': { const st = await prisma.roomStyle.findUnique({ where: { id }, include: { room: true } }); return st ? `${st.room.label} colors` : null; }
+    case 'wall_style': { const st = await prisma.wallStyle.findUnique({ where: { id }, include: { wall: { include: { room: true } } } }); return st ? `${st.wall.room.label} · ${st.wall.label ?? `wall ${st.wallId}`} color` : null; }
     case 'workspace': return (await prisma.workspace.findUnique({ where: { id } }))?.name ?? null;
   }
   return null;
@@ -282,6 +284,8 @@ export async function getProposal(id: number) {
     rooms: p.rooms.map((r) => r.room),
     rationale: p.rationale,
     cost: { lowUsd: usd(p.costLowCents), highUsd: usd(p.costHighCents), steps: p.costSteps.map((s) => ({ step: s.step, changes: s.changesText, lowUsd: s.lowCents / 100, highUsd: s.highCents / 100 })) },
+    // What the pieces and wall finishes drawn on the plan cost (own price, else the template's typical range).
+    planCost: p.kind === 'measurements' ? null : await estimateOps(ops),
     baseRevision: p.baseRevision,
     changes: p.kind === 'measurements' ? measurementRows : diff,
     photos,
@@ -440,7 +444,23 @@ async function currentPlan(workspaceId: number) {
       if (Object.keys(fields).length > 1) changes.push({ op: 'create', entityType: 'room_style', tempRef: `s${st.roomId}`, fields });
     } else for (const f of STYLE_FIELDS) if (st[f] !== old[f]) changes.push({ op: 'update', entityType: 'room_style', entityId: old.id, field: f, value: st[f] });
   }
-  return { ws, rooms, roomIds, keep, skipped, oldPls, styles, oldStyles, changes };
+  // Per-wall colors and finishes (accent walls, limewash): Current gets exactly the design's.
+  const inRooms = { wall: { roomId: { in: roomIds } } };
+  const [wallStyles, oldWallStyles] = await Promise.all([
+    prisma.wallStyle.findMany({ where: { workspaceId, ...inRooms }, orderBy: { id: 'asc' } }),
+    prisma.wallStyle.findMany({ where: { workspaceId: null, ...inRooms }, orderBy: { id: 'asc' } }),
+  ]);
+  const WALL_FIELDS = ['colorName', 'color', 'finish', 'notes'] as const;
+  for (const st of wallStyles) {
+    const old = oldWallStyles.find((o) => o.wallId === st.wallId);
+    if (!old) {
+      const fields: Record<string, any> = { wallId: st.wallId, finish: st.finish };
+      for (const f of WALL_FIELDS) if (st[f] != null) fields[f] = st[f];
+      changes.push({ op: 'create', entityType: 'wall_style', tempRef: `w${st.wallId}`, fields });
+    } else for (const f of WALL_FIELDS) if (st[f] !== old[f]) changes.push({ op: 'update', entityType: 'wall_style', entityId: old.id, field: f, value: st[f] });
+  }
+  for (const old of oldWallStyles) if (!wallStyles.some((st) => st.wallId === old.wallId)) changes.push({ op: 'delete', entityType: 'wall_style', entityId: old.id });
+  return { ws, rooms, roomIds, keep, skipped, oldPls, styles, oldStyles, wallStyles, oldWallStyles, changes };
 }
 
 /**
@@ -448,7 +468,7 @@ async function currentPlan(workspaceId: number) {
  * the ideas that are left out, the rooms whose colors change, and pending proposals on the design.
  */
 export async function saveToCurrentSummary(workspaceId: number) {
-  const { ws, rooms, keep, skipped, oldPls, styles, oldStyles, changes } = await currentPlan(workspaceId);
+  const { ws, rooms, keep, skipped, oldPls, styles, oldStyles, wallStyles, oldWallStyles, changes } = await currentPlan(workspaceId);
   const items = await prisma.furnitureItem.findMany({ where: { id: { in: [...keep, ...skipped].map((p) => p.itemId) } }, select: { id: true, name: true } });
   const nm = (id: number) => items.find((i) => i.id === id)?.name ?? `item ${id}`;
   const pending = await prisma.proposal.findMany({ where: { status: 'pending', targetWorkspaceId: workspaceId }, select: { id: true, title: true }, orderBy: { id: 'asc' } });
@@ -463,6 +483,11 @@ export async function saveToCurrentSummary(workspaceId: number) {
     goesIn: keep.map((p) => ({ placementId: p.id, name: nm(p.itemId), action: p.action, roomId: p.roomId })),
     leftOut: skipped.map((p) => ({ placementId: p.id, name: nm(p.itemId), action: p.action, roomId: p.roomId })),
     replacesCurrentPieces: oldPls.length, colors: colorRooms, pending,
+    wallColors: {
+      set: wallStyles.filter((st) => { const o = oldWallStyles.find((x) => x.wallId === st.wallId); return !o || o.color !== st.color || o.colorName !== st.colorName || o.finish !== st.finish || o.notes !== st.notes; })
+        .map((st) => ({ wallId: st.wallId, color: st.color, colorName: st.colorName, finish: st.finish })),
+      cleared: oldWallStyles.filter((o) => !wallStyles.some((st) => st.wallId === o.wallId)).map((o) => ({ wallId: o.wallId })),
+    },
     nothingToChange: changes.length === 0, changeCount: changes.length,
   };
 }
@@ -496,6 +521,7 @@ export async function proposeAsCurrent(workspaceId: number) {
     `Michael asked to make the furniture and colors in "${ws.name}" (revision ${ws.revision}) what is in the house now.`,
     `${keep.length} piece(s) marked existing or keep are copied into Current${oldPls.length ? `, replacing Current's ${oldPls.length} piece(s) in ${names}` : ` for ${names}`}.`,
     styles.length ? `Colors for ${styles.length} room(s) are copied.` : 'No colors are set in this workspace.',
+    changes.some((c) => c.entityType === 'wall_style') ? 'Per-wall colors and finishes (accent walls, limewash) are copied.' : '',
     skipped.length ? `Left out as design ideas (new, replace or remove): ${skipped.map((p) => p.item.name).join(', ')}.` : '',
     `The workspace itself is not changed. Approving makes a normal Current revision, which can be rolled back.`,
   ].filter(Boolean).join(' ');

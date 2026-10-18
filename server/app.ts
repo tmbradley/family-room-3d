@@ -299,7 +299,7 @@ app.get('/login.js', serveStatic({ path: './server/public/login.js' }));
 // Pairing link (https://<host>/scan?token=...): opens the iPhone app; this page is the fallback. Shows only the code.
 app.get('/scan', serveStatic({ path: './server/public/scan.html' }));
 app.get('/scan.js', serveStatic({ path: './server/public/scan.js' }));
-for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js', 'undo.js']) {
+for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js', 'undo.js', 'decor.js']) {
   app.get(`/${f}`, serveStatic({ path: `./${f}` }));
 }
 app.get('/', serveStatic({ path: './index.html' }));

@@ -3,14 +3,14 @@
 // view, or two in Compare) and the inspector on the right (Details / Proposals / History).
 // All data comes from and goes to the API; every edit is a revision.
 import { CATALOG } from './catalog.js';
-import { RoomView, escapeHtml as esc, footprintFt, setTemplates } from './scene.js';
+import { RoomView, escapeHtml as esc, footprintFt, setTemplates, wallPose } from './scene.js';
 import { api, ApiError } from './api.js';
 import { UndoBook, applyEntry, shortcutFor } from './undo.js';
 
 const $ = (id) => document.getElementById(id);
 const LS = { open: 'hp.open.v1', drafts: 'hp.drafts.v1', prefs: 'hp.prefs.v1' };
 const params = new URLSearchParams(location.search);
-const prefs = Object.assign({ sync: true, mode: '3d', walls: 'cut', snap: true, labels: true }, JSON.parse(localStorage.getItem(LS.prefs) || '{}'));
+const prefs = Object.assign({ sync: true, mode: '3d', walls: 'cut', snap: true, labels: true, evening: false }, JSON.parse(localStorage.getItem(LS.prefs) || '{}'));
 const savePrefs = () => localStorage.setItem(LS.prefs, JSON.stringify(prefs));
 
 const state = {
@@ -180,7 +180,7 @@ function makePane() {
   return pane;
 }
 const paneOf = (view) => state.panes.find((p) => p.view === view);
-function applyViewPrefs(v) { v.walls = prefs.walls; v.snap = prefs.snap; v.setMode(prefs.mode); }
+function applyViewPrefs(v) { v.walls = prefs.walls; v.snap = prefs.snap; v.setMode(prefs.mode); v.setEvening(prefs.evening); }
 function setPaneCount(n) {
   while (state.panes.length < n) state.panes.push(makePane());
   while (state.panes.length > n) { const p = state.panes.pop(); p.view.dispose(); p.el.remove(); }
@@ -300,14 +300,31 @@ function diffViews(a, b) {
   }
   for (const q of pa) if (!used.has(q.id)) removed.push(q);
   const colors = [];
+  let lowUsd = 0, highUsd = 0;
   for (const r of b?.rooms ?? []) {
     const o = (a?.rooms ?? []).find((x) => x.id === r.id); if (!o) continue;
     for (const [k, l] of [['wallColor', 'walls'], ['trimColor', 'trim'], ['deviceColor', 'outlets']]) if ((r[k]?.color ?? null) !== (o[k]?.color ?? null)) colors.push(`${r.label} ${l}`);
     if ((r.floor?.color ?? null) !== (o.floor?.color ?? null)) colors.push(`${r.label} floor`);
+    // Per-wall color and finish (accent wall, limewash), counted like the server's planCost.
+    for (const w of r.walls ?? []) {
+      const ws = w.style, ow = (o.walls ?? []).find((x) => x.id === w.id)?.style ?? null;
+      if ((ws?.color ?? null) === (ow?.color ?? null) && (ws?.finish ?? null) === (ow?.finish ?? null)) continue;
+      colors.push(`${r.label} ${w.label ?? 'wall'}${ws ? ` ${ws.finish === 'limewash' ? 'limewash' : 'paint'}` : ' back to room color'}`);
+      if (ws) { const [lo, hi] = WALL_FINISH_COST[ws.finish] ?? WALL_FINISH_COST.paint; lowUsd += lo; highUsd += hi; }
+    }
+  }
+  // New pieces at their own price, else the template's typical range.
+  for (const p of added) {
+    if (p.action !== 'new') continue;
+    if (p.item?.priceCents != null) { lowUsd += p.item.priceCents / 100; highUsd += p.item.priceCents / 100; continue; }
+    const t = p.template && state.templates.find((x) => x.slug === p.template.slug);
+    if (t?.typicalPriceUsd) { lowUsd += t.typicalPriceUsd.low; highUsd += t.typicalPriceUsd.high; }
   }
   const cents = added.reduce((s, p) => s + (p.item?.priceCents ?? 0), 0);
-  return { added, changed, removed, colors, count: added.length + changed.length + removed.length + colors.length, cents };
+  return { added, changed, removed, colors, count: added.length + changed.length + removed.length + colors.length, cents, lowUsd, highUsd };
 }
+const WALL_FINISH_COST = { paint: [40, 250], limewash: [90, 450] };
+const usdRange = (lo, hi) => (Math.round(lo) === Math.round(hi) ? usd(lo) : `${usd(lo)}–${usd(hi)}`);
 function diffText(d) {
   const moved = (c) => (c.p.xIn !== c.q.xIn || c.p.yIn !== c.q.yIn || c.p.rotationDeg !== c.q.rotationDeg ? 'moved' : 'changed');
   return [...d.added.map((p) => `+ ${p.item.name}`), ...d.removed.map((p) => `− ${p.item.name}`), ...d.changed.map((c) => `${c.p.item.name} ${moved(c)}`), ...d.colors.map((c) => `${c} color`)].join(' · ');
@@ -397,7 +414,7 @@ function renderDiffbar() {
     right = `<button class="b" data-db="review">Review scan</button>`;
   } else {
     const ws = keyWs(b.key);
-    right = `${d.cents ? `<b>${usd(d.cents / 100)}</b>` : ''}${a.key === 'cur' && canEditWs(ws) ? '<button class="b primary" data-db="save">⤒ Save to Current…</button>' : ''}`;
+    right = `${d.highUsd ? `<b title="New pieces at their price, else the template's typical range, plus wall finishes">${usdRange(d.lowUsd, d.highUsd)}</b>` : ''}${a.key === 'cur' && canEditWs(ws) ? '<button class="b primary" data-db="save">⤒ Save to Current…</button>' : ''}`;
   }
   bar.innerHTML = `<b>${scId != null ? `Scan #${scId} vs Current` : `${d.count} change${d.count === 1 ? '' : 's'} vs ${esc(other)}`}</b><span class="meta list" title="${esc(list)}">${esc(list || 'No differences in furniture or colors')}</span>${right}`;
   bar.hidden = false;
@@ -411,6 +428,7 @@ function renderViewControls() {
   $('btnWalls').textContent = prefs.walls === 'full' ? 'Walls: full' : 'Walls: cutaway';
   $('btnWalls').title = prefs.walls === 'full' ? 'Full walls; the near walls are cut away automatically' : "Walls cut at 3'";
   $('btnLabels').textContent = prefs.labels ? 'Labels ✓' : 'Labels';
+  $('btnEvening').classList.toggle('on', !!prefs.evening); $('btnEvening').textContent = prefs.evening ? '🌙 Evening ✓' : '🌙 Evening';
   $('btnLabels').classList.toggle('on', false);
   $('snapToggle').checked = prefs.snap;
   $('panes').classList.toggle('hide-labels', !prefs.labels);
@@ -618,7 +636,7 @@ function renderTool() {
     if (key === 'cur') toolPop(e.currentTarget, (el) => { el.innerHTML = `<button class="mi" data-x="export">Export JSON</button>${state.editable ? '<button class="mi" data-x="pair">📱 Pair phone…</button>' : ''}`; el.querySelector('[data-x="export"]').onclick = () => { closePops(); download('current', currentData()); }; el.querySelector('[data-x="pair"]')?.addEventListener('click', () => { closePops(); showPairDialog(); }); });
     else designMenu(e.currentTarget, keyWs(key));
   };
-  tool.querySelector('[data-t="add"]')?.addEventListener('click', (e) => { e.stopPropagation(); toolPop(e.currentTarget, fillAdd, 320); });
+  tool.querySelector('[data-t="add"]')?.addEventListener('click', (e) => { e.stopPropagation(); toolPop(e.currentTarget, fillAdd, 400); });
   tool.querySelector('[data-t="save"]')?.addEventListener('click', () => openSaveDialog(keyWs(key)));
   tool.querySelector('[data-t="edit"]')?.addEventListener('click', () => openNewDesign({ mode: 'current' }));
   tool.querySelector('[data-t="rescan"]')?.addEventListener('click', () => showPairDialog(currentRooms()[0]?.id));
@@ -631,6 +649,7 @@ function toolPop(anchor, fill, width = 280) {
   const was = document.querySelector(`.tool-pop[data-for="${anchor.dataset.t}"]`);
   closePops();
   if (was) return;
+  width = Math.min(width, innerWidth - 16); // phones
   const pop = document.createElement('div'); pop.className = 'pop tool-pop'; pop.dataset.for = anchor.dataset.t; pop.style.width = `${width}px`;
   document.body.appendChild(pop);
   const r = anchor.getBoundingClientRect();
@@ -649,11 +668,23 @@ function fillCompare(el) {
     ${state.compare ? '<div class="sep"></div><button class="mi" data-c="">✕ Close compare</button>' : ''}`;
   el.querySelectorAll('[data-c]').forEach((b) => (b.onclick = () => { closePops(); const k = b.dataset.c; if (keyPv(k) != null) compareProposal(keyPv(k)); else setCompare(k || null); }));
 }
-let addTab = 'templates';
+let addTab = 'furniture';
+/** Template groups in menu order (template_groups), from the templates list. */
+function templateGroups() {
+  const out = [];
+  for (const t of state.templates) { const k = t.group ?? 'furniture'; let g = out.find((x) => x.key === k); if (!g) out.push((g = { key: k, label: t.groupLabel ?? 'Furniture', items: [] })); g.items.push(t); }
+  return out;
+}
+const MOUNT_NOTE = { wall: 'on a wall', ceiling: 'from the ceiling', surface: 'on a table or the floor', soft: 'on a sofa or chair' };
 function fillAdd(el) {
-  const tabs = `<div class="ptabs"><button data-at="templates" class="${addTab === 'templates' ? 'on' : ''}">Templates</button><button data-at="catalog" class="${addTab === 'catalog' ? 'on' : ''}">Catalog</button><button data-at="custom" class="${addTab === 'custom' ? 'on' : ''}">Custom box</button></div>`;
+  const groups = templateGroups();
+  if (!groups.some((g) => g.key === addTab) && !['catalog', 'custom'].includes(addTab)) addTab = groups[0]?.key ?? 'catalog';
+  const tab = (k, l) => `<button data-at="${esc(k)}" class="${addTab === k ? 'on' : ''}">${esc(l)}</button>`;
+  const tabs = `<div class="ptabs wrap">${groups.map((g) => tab(g.key, g.label)).join('')}${tab('catalog', 'Catalog')}${tab('custom', 'Custom box')}</div>`;
   let body = '';
-  if (addTab === 'templates') body = state.templates.length ? `<div class="grid2">${state.templates.map((t) => `<button class="mi" data-tpl="${esc(t.slug)}">${esc(t.name)}<small>${t.defaults.wIn}" × ${t.defaults.dIn}"${t.kind === 'rug' ? '' : ` × ${t.defaults.hIn}"`}</small></button>`).join('')}</div>` : '<div class="empty">No templates.</div>';
+  const grp = groups.find((g) => g.key === addTab);
+  if (grp) body = `<div class="grid2">${grp.items.map((t) => `<button class="mi" data-tpl="${esc(t.slug)}" title="${esc(t.description ?? '')}">${esc(t.name)}<small>${t.mount && MOUNT_NOTE[t.mount] ? `${MOUNT_NOTE[t.mount]} · ` : ''}${t.defaults.wIn}" × ${t.defaults.dIn}"${t.kind === 'rug' ? '' : ` × ${t.defaults.hIn}"`}${t.typicalPriceUsd ? ` · ~${usdRange(t.typicalPriceUsd.low, t.typicalPriceUsd.high)}` : ''}</small></button>`).join('')}</div>`;
+  else if (addTab !== 'catalog' && addTab !== 'custom') body = '<div class="empty">No templates.</div>';
   else if (addTab === 'catalog') body = `<div class="grid2">${CATALOG.map((c, i) => `<button class="mi" data-cat="${i}">${esc(c.name)}<small>${c.w}" × ${c.d}"${c.kind === 'rug' ? '' : ` × ${c.h}"`}${c.price ? ' · $' + c.price : ''}</small></button>`).join('')}</div>`;
   else body = `<form id="customForm" style="padding:4px 4px 2px"><label>Name <input id="cName" value="Bookshelf" required maxlength="160"></label>
       <div class="row" style="margin-top:6px"><label>W" <input id="cW" type="number" min="1" step="1" value="36" required></label><label>D" <input id="cD" type="number" min="1" step="1" value="14" required></label><label>H" <input id="cH" type="number" min="1" step="1" value="72" required></label></div>
@@ -747,14 +778,56 @@ function addPiece(spec) {
     { op: 'create', entityType: 'placement', tempRef: 'p', fields: { roomId: room.id, itemId: '$i', xIn: cx, yIn: cy, rotationDeg: 0, action: 'new' } },
   ], `Added ${spec.name}`);
 }
+/** Where a new template piece starts: wall pieces on a wall (curtains over a window), pillows on a sofa, a lamp on a side table. */
+function startPose(t, room, cx, cy) {
+  const walls = room.walls, closed = walls.filter((w) => !w.isOpen);
+  const len = (w) => Math.hypot(w.endXIn - w.startXIn, w.endYIn - w.startYIn);
+  const size = { wIn: t.defaults.wIn, dIn: t.defaults.dIn, hIn: Math.max(1, t.defaults.hIn) };
+  if (t.mount === 'wall' && closed.length) {
+    let wall = [...closed].sort((a, b) => len(b) - len(a))[0], off = len(wall) / 2;
+    if (t.slug === 'curtains') {
+      const w = closed.find((x) => x.openings?.some((o) => o.type === 'window'));
+      if (w) { const o = w.openings.find((x) => x.type === 'window'); wall = w; off = o.offsetIn + o.widthIn / 2; size.wIn = Math.round(o.widthIn + 16); }
+    }
+    const pose = wallPose(walls, wall.id, off, size.dIn);
+    if (pose) return { ...pose, ...size };
+  }
+  const pieces = room.furniture.filter((f) => f.action !== 'remove');
+  const host = (kinds) => pieces.filter((f) => kinds.includes(f.item.kind) || kinds.includes(f.template?.slug)).sort((a, b) => a.item.wIn * a.item.dIn - b.item.wIn * b.item.dIn)[0];
+  if (t.mount === 'soft') {
+    const h = host(['sofa', 'sectional', 'chair', 'bed']);
+    if (h) {
+      // Toward the host's back: rotationDeg 0 faces -y, so its back is +y.
+      const a = (h.rotationDeg * Math.PI) / 180, back = t.slug === 'pillows' ? Math.max(h.item.dIn / 2 - 12, 0) : 0;
+      return { xIn: Math.round(h.xIn - Math.sin(a) * back), yIn: Math.round(h.yIn + Math.cos(a) * back), rotationDeg: h.rotationDeg, ...size };
+    }
+  }
+  if (t.slug === 'table_lamp') { const h = host(['side_table', 'drum_side_table', 'nightstand', 'console_table', 'console', 'dresser', 'media_console']); if (h) return { xIn: h.xIn, yIn: h.yIn, rotationDeg: h.rotationDeg, ...size }; }
+  if (t.slug === 'plant') {
+    const xs = walls.flatMap((w) => [w.startXIn, w.endXIn]), ys = walls.flatMap((w) => [w.startYIn, w.endYIn]);
+    return { xIn: Math.round(Math.min(...xs) + size.wIn / 2 + 8), yIn: Math.round(Math.min(...ys) + size.dIn / 2 + 8), rotationDeg: 0, ...size };
+  }
+  return { xIn: cx, yIn: cy, rotationDeg: 0, ...size };
+}
 function addTemplatePiece(t) {
   const wsId = targetWs(); const data = wsId != null && state.cache.get(wsId);
   if (!t || !data || !data.rooms.length) return toast('Open a design with a room first', true);
   const { room, cx, cy } = roomCenter(data);
+  const pose = startPose(t, room, cx, cy);
   saveOps(wsId, [
-    { op: 'create', entityType: 'furniture_item', tempRef: 'i', fields: { kind: t.kind, name: t.name, wIn: t.defaults.wIn, dIn: t.defaults.dIn, hIn: Math.max(1, t.defaults.hIn), status: 'idea' } },
-    { op: 'create', entityType: 'placement', tempRef: 'p', fields: { roomId: room.id, itemId: '$i', xIn: cx, yIn: cy, rotationDeg: 0, action: 'new', templateId: t.id } },
+    { op: 'create', entityType: 'furniture_item', tempRef: 'i', fields: { kind: t.kind, name: t.name, wIn: pose.wIn, dIn: pose.dIn, hIn: pose.hIn, status: 'idea' } },
+    { op: 'create', entityType: 'placement', tempRef: 'p', fields: { roomId: room.id, itemId: '$i', xIn: pose.xIn, yIn: pose.yIn, rotationDeg: pose.rotationDeg, action: 'new', templateId: t.id } },
   ], `Added ${t.name}`);
+}
+/** Ceiling fan → pendant: the fan is marked "replace" and a pendant takes its place (one revision). */
+function swapFanForPendant(p) {
+  const wsId = focusedWs(), t = state.templates.find((x) => x.slug === 'pendant');
+  if (!t || !canEditWs(wsId)) return;
+  saveOps(wsId, [
+    { op: 'update', entityType: 'placement', entityId: p.id, field: 'action', value: 'replace' },
+    { op: 'create', entityType: 'furniture_item', tempRef: 'i', fields: { kind: t.kind, name: t.name, wIn: t.defaults.wIn, dIn: t.defaults.dIn, hIn: Math.max(1, t.defaults.hIn), status: 'idea' } },
+    { op: 'create', entityType: 'placement', tempRef: 'p', fields: { roomId: p.roomId, itemId: '$i', xIn: p.xIn, yIn: p.yIn, rotationDeg: 0, action: 'new', templateId: t.id, replacesPlacementId: p.id } },
+  ], `Swapped ${p.item.name} for a pendant`);
 }
 function duplicateSelected() {
   const p = state.selection, wsId = focusedWs();
@@ -812,7 +885,9 @@ function renderDetails(body) {
     html += `<h3>Selected</h3><div class="card"><h4>${esc(p.item.name)}</h4>
       <div class="meta">${fmtIn(p.item.wIn)} W × ${fmtIn(p.item.dIn)} D × ${fmtIn(p.item.hIn)} H · ${esc(p.action)}${p.item.status ? ' · ' + esc(p.item.status) : ''}</div>
       <div class="meta">At x ${fmtIn(p.xIn)}, y ${fmtIn(p.yIn)} · rotated ${p.rotationDeg}° · footprint ${fmtIn(Math.round(f.w * 12))} × ${fmtIn(Math.round(f.d * 12))}</div>
-      ${editable ? `<div class="actions"><button class="b" data-sel="rotate">⟳ Rotate <kbd>R</kbd></button><button class="b" data-sel="dup">⧉ Duplicate</button><button class="b danger" data-sel="delete">Delete</button></div>` : ''}</div>
+      ${editable ? `<div class="actions"><button class="b" data-sel="rotate">⟳ Rotate <kbd>R</kbd></button><button class="b" data-sel="dup">⧉ Duplicate</button><button class="b danger" data-sel="delete">Delete</button></div>` : ''}
+      ${editable && p.template?.slug === 'ceiling_fan' && p.action !== 'replace' ? '<div class="actions"><button class="b" data-sel="swapfan">💡 Swap for a pendant</button></div>' : ''}
+      ${tplHint(p)}</div>
       ${templatePanelHtml(p, editable)}
       ${editable ? `<label class="prm"><span>In this design</span><select id="actionSel">${['existing', 'keep', 'replace', 'remove', 'new'].map((a) => `<option value="${a}" ${p.action === a ? 'selected' : ''}>${{ existing: 'existing (as is)', keep: 'keep', replace: 'replace', remove: 'remove', new: 'new' }[a]}</option>`).join('')}</select></label>` : ''}
       <h3>Measurements (in)</h3>${measRow('furniture_item', p.item.id, 'wIn', 'Width', p.item.wIn, p.item.measurements)}${measRow('furniture_item', p.item.id, 'dIn', 'Depth', p.item.dIn, p.item.measurements)}${measRow('furniture_item', p.item.id, 'hIn', 'Height', p.item.hIn, p.item.measurements)}
@@ -832,6 +907,7 @@ function wireDetails(body, p, editable) {
   body.querySelector('[data-sel="rotate"]')?.addEventListener('click', () => fv()?.rotateSelected());
   body.querySelector('[data-sel="dup"]')?.addEventListener('click', duplicateSelected);
   body.querySelector('[data-sel="delete"]')?.addEventListener('click', deleteSelected);
+  body.querySelector('[data-sel="swapfan"]')?.addEventListener('click', () => swapFanForPendant(p));
   const wsId = focusedWs();
   body.querySelector('#actionSel')?.addEventListener('change', (e) => saveOps(wsId, [{ op: 'update', entityType: 'placement', entityId: p.id, field: 'action', value: e.target.value }], `Marked ${p.item.name} ${e.target.value}`));
   wireMeasurements(body);
@@ -859,8 +935,15 @@ function templatePanelHtml(p, editable) {
     if (q.type === 'boolean') return `<input type="checkbox" data-k="${esc(q.key)}" ${v === 'true' ? 'checked' : ''} ${dis}>`;
     return `<input type="number" data-k="${esc(q.key)}" value="${esc(v)}" min="${q.min}" max="${q.max}" step="1" ${dis}>`;
   };
-  return `<label class="prm"><span>Template</span><select id="tplSel" ${dis}><option value="">(basic shape)</option>${state.templates.map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.template?.slug ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>
+  const opts = templateGroups().map((g) => `<optgroup label="${esc(g.label)}">${g.items.map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.template?.slug ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</optgroup>`).join('');
+  return `<label class="prm"><span>Template</span><select id="tplSel" ${dis}><option value="">(basic shape)</option>${opts}</select></label>
     ${t ? t.params.map((q) => `<label class="prm"><span>${esc(q.label)}</span>${input(q)}</label>`).join('') : ''}`;
+}
+function tplHint(p) {
+  const t = p.template && state.templates.find((x) => x.slug === p.template.slug); if (!t) return '';
+  const bits = [t.description, t.mount === 'wall' ? 'Hangs on the nearest wall; drag it along or to another wall.' : t.mount === 'ceiling' ? 'Hangs from the ceiling.' : t.mount === 'surface' ? 'Sits on the table or shelf under it.' : t.mount === 'soft' ? 'Sits on the sofa or chair under it.' : null,
+    p.item.priceCents == null && t.typicalPriceUsd ? `Typical price ${usdRange(t.typicalPriceUsd.low, t.typicalPriceUsd.high)} (counted in costs until a price is set).` : null].filter(Boolean);
+  return bits.length ? `<div class="meta">${esc(bits.join(' '))}</div>` : '';
 }
 function modelHtml(p, editable) {
   const m = p.model;
@@ -905,6 +988,7 @@ function roomDetailsHtml(data, key, editable) {
     const rows = [['wall', 'Walls', r.wallColor], ['trim', 'Trim', r.trimColor], ['floor', 'Floor', { color: r.floor?.color, name: r.floor?.colorName }], ['device', 'Outlets', r.deviceColor]];
     if (editable && wsId != null) html += `<div class="colors" data-room="${r.id}">${rows.map(([k, l, c]) => `<span>${l}</span><span>${c?.name ? `<span class="meta">${esc(c.name)}</span> ` : ''}<input type="color" data-color="${k}" value="${esc(hex(c?.color))}" title="${l} color (undo with ${MAC ? '⌘Z' : 'Ctrl+Z'})" aria-label="${l} color"></span>`).join('')}</div>`;
     else html += `<div class="kv">${rows.map(([, l, c]) => `<span>${l}</span><span>${sw(c)}</span>`).join('')}</div>`;
+    html += wallFinishHtml(r, editable && wsId != null);
     if (r.mirrored) html += `<div class="mirror-note">This room came from an older scan and is drawn as a <b>mirror image</b>. ${state.editable ? `<button class="b sm" data-mirror="${r.id}">Fix mirror image</button>` : 'Michael can fix it.'}</div>`;
   }
   html += `<h3>Photos</h3><div id="photoStrip" class="photo-strip"><span class="meta">Loading…</span></div>`;
@@ -919,8 +1003,37 @@ function roomDetailsHtml(data, key, editable) {
   }
   return html;
 }
+/** Per wall: its own color and finish (accent wall, limewash), or the room's wall color. */
+function wallFinishHtml(r, editable) {
+  const walls = r.walls.filter((w) => !w.isOpen);
+  if (!walls.length) return '';
+  const hex = (c) => (/^#[0-9a-f]{6}/i.test(c ?? '') ? c.slice(0, 7) : '#d8cfc2');
+  const rows = walls.map((w, i) => {
+    const st = w.style, name = w.label ?? `Wall ${i + 1}`, len = fmtIn(Math.round(Math.hypot(w.endXIn - w.startXIn, w.endYIn - w.startYIn)));
+    if (!editable) return `<span>${esc(name)} <span class="meta">${len}</span></span><span>${st ? `<span class="sw" style="background:${esc(st.color)}"></span>${esc(st.colorName ?? st.color)} · ${esc(st.finish)}` : '<span class="meta">room color</span>'}</span>`;
+    return `<span>${esc(name)} <span class="meta">${len}</span></span><span class="wf" data-wall="${w.id}" data-room="${r.id}">
+      <input type="color" data-wf="color" value="${esc(hex(st?.color ?? r.wallColor?.color))}" title="${esc(name)} color" aria-label="${esc(name)} color">
+      <select data-wf="finish" aria-label="${esc(name)} finish"><option value="" ${st ? '' : 'selected'}>Room color</option><option value="paint" ${st?.finish === 'paint' ? 'selected' : ''}>Paint</option><option value="limewash" ${st?.finish === 'limewash' ? 'selected' : ''}>Limewash</option></select></span>`;
+  }).join('');
+  return `<h3>${esc(r.label)} · walls</h3><div class="colors walls">${rows}</div>${editable ? '<p class="meta">Pick a color or finish for one wall (an accent wall, limewash). "Room color" puts it back.</p>' : ''}`;
+}
+function setWallFinish(wsId, room, wall, { color, finish }) {
+  const st = wall.style, name = wall.label ?? 'wall';
+  let changes;
+  if (finish === '') changes = st ? [{ op: 'delete', entityType: 'wall_style', entityId: st.id }] : [];
+  else if (!st) changes = [{ op: 'create', entityType: 'wall_style', fields: { wallId: wall.id, color: color ?? room.wallColor?.color ?? '#d8cfc2', finish: finish ?? 'paint' } }];
+  else changes = [...(color && color !== st.color ? [{ op: 'update', entityType: 'wall_style', entityId: st.id, field: 'color', value: color }, ...(st.colorName ? [{ op: 'update', entityType: 'wall_style', entityId: st.id, field: 'colorName', value: null }] : [])] : []),
+    ...(finish && finish !== st.finish ? [{ op: 'update', entityType: 'wall_style', entityId: st.id, field: 'finish', value: finish }] : [])];
+  if (changes.length) saveOps(wsId, changes, `${room.label} ${name}: ${finish === '' ? 'room color' : [color, finish].filter(Boolean).join(', ')}`);
+}
 function wireRoom(body) {
   const pane = focusedPane(), wsId = keyWs(pane?.key), rooms = pane?.data?.rooms ?? [];
+  body.querySelectorAll('.wf [data-wf]').forEach((inp) => (inp.onchange = () => {
+    const box = inp.closest('.wf'), room = rooms.find((r) => r.id === Number(box.dataset.room)), wall = room?.walls.find((w) => w.id === Number(box.dataset.wall));
+    if (!wall) return;
+    if (inp.dataset.wf === 'color') setWallFinish(wsId, room, wall, { color: inp.value, finish: wall.style?.finish || 'paint' });
+    else setWallFinish(wsId, room, wall, { color: wall.style ? undefined : box.querySelector('[data-wf="color"]').value, finish: inp.value });
+  }));
   body.querySelectorAll('.colors input[data-color]').forEach((inp) => (inp.onchange = () => {
     const room = rooms.find((r) => r.id === Number(inp.closest('.colors').dataset.room));
     setColor(wsId, room, inp.dataset.color, inp.value);
@@ -1018,6 +1131,7 @@ function proposalCard(p, { full = true } = {}) {
     <details ${p.changes.length <= 6 ? 'open' : ''}><summary class="meta">${p.kind === 'measurements' ? 'Measurements to record' : 'Changes'} (${p.changes.length})</summary><table class="diff">${p.changes.map(diffRow).join('')}</table></details>
     ${p.photos?.length ? `<div class="photo-strip">${p.photos.map(photoThumb).join('')}</div>` : ''}
     <table class="cost"><tr><th>Step</th><th>What changes</th><th class="num">Low–high</th></tr>${steps}<tr><td colspan="2"><b>Total</b></td><td class="num"><b>${usd(p.cost.lowUsd)}–${usd(p.cost.highUsd)}</b></td></tr></table>
+    ${p.planCost?.lines?.length ? `<details><summary class="meta">Pieces and wall finishes on the plan: ${usdRange(p.planCost.lowUsd, p.planCost.highUsd)}</summary><table class="cost">${p.planCost.lines.map((l) => `<tr><td>${esc(l.what)}</td><td class="meta">${l.basis === 'price' ? 'price' : l.basis === 'wall_finish' ? 'per wall' : 'typical'}</td><td class="num">${usdRange(l.lowUsd, l.highUsd)}</td></tr>`).join('')}</table></details>` : ''}
     ${p.decidedAt ? `<div class="meta" style="margin-top:6px">Decided ${when(p.decidedAt)}${p.decisionNote ? `: ${esc(p.decisionNote)}` : ''}${p.appliedRevision ? ` · applied as revision ${p.appliedRevision.number}` : ''}</div>` : ''}
     ${viewable ? `<div class="actions"><button class="b ${showingThis ? 'on' : ''}" data-act="show">👁 ${showingThis ? 'Showing on plan' : 'Show on plan'}</button><button class="b ${comparingThis ? 'on' : ''}" data-act="compare">⇆ Compare</button></div>` : ''}
     ${can ? `<div class="actions"><button class="b primary wide" data-act="approve">✓ Approve</button><button class="b danger wide" data-act="reject">✕ Reject</button></div>
@@ -1459,6 +1573,7 @@ $('btn3d').onclick = () => setModeAll('3d');
 $('btnTop').onclick = () => setModeAll('top');
 $('btnWalls').onclick = () => { prefs.walls = prefs.walls === 'full' ? 'cut' : 'full'; savePrefs(); state.panes.forEach((p) => (p.view.walls = prefs.walls)); renderViewControls(); };
 $('btnLabels').onclick = () => { prefs.labels = !prefs.labels; savePrefs(); renderViewControls(); };
+$('btnEvening').onclick = () => { prefs.evening = !prefs.evening; savePrefs(); state.panes.forEach((p) => p.view.setEvening(prefs.evening)); renderViewControls(); };
 $('snapToggle').onchange = (e) => { prefs.snap = e.target.checked; savePrefs(); state.panes.forEach((p) => (p.view.snap = prefs.snap)); };
 $('floatbar').querySelectorAll('[data-fb]').forEach((b) => (b.onclick = () => {
   const a = b.dataset.fb;

@@ -17,8 +17,12 @@ async function measurementLookup(tx: Tx) {
 }
 
 const roomInclude = (workspaceId: number | null) => ({
-  walls: { include: { openings: { orderBy: { id: 'asc' as const } } }, orderBy: { id: 'asc' as const } },
-  fixtures: { orderBy: { id: 'asc' as const } },
+  walls: { include: { openings: { orderBy: { id: 'asc' as const } }, styles: { where: { workspaceId } } }, orderBy: { id: 'asc' as const } },
+  // Current's fixtures, or (in a design) the design's own plus those of its draft rooms.
+  fixtures: {
+    where: workspaceId === null ? { workspaceId: null } : { OR: [{ workspaceId }, { workspaceId: null, room: { draftWorkspaceId: workspaceId } }] },
+    orderBy: { id: 'asc' as const },
+  },
   placements: {
     where: { workspaceId },
     include: { item: true, template: { select: { id: true, slug: true, name: true } }, params: { orderBy: { key: 'asc' as const } }, model: { include: { upload: { select: { format: true, bytes: true } } } } },
@@ -45,8 +49,10 @@ export async function roomViews(tx: Tx, where: any, workspaceId: number | null) 
     style: st ?? null,
     measurementStatus: r.measurementStatus,
     measurements: sources('room', r.id),
-    walls: r.walls.map(({ openings, ...w }) => ({
+    walls: r.walls.map(({ openings, styles, ...w }) => ({
       ...w, measurements: sources('wall', w.id),
+      // This workspace's color and finish for the wall (accent wall, limewash), or null = the room's wall color.
+      style: styles[0] ? { id: styles[0].id, color: styles[0].color, colorName: styles[0].colorName, finish: styles[0].finish, notes: styles[0].notes } : null,
       openings: openings.map((o) => ({ ...o, measurements: sources('opening', o.id) })),
     })),
     fixtures: r.fixtures.map((f) => ({ ...f, measurements: sources('fixture', f.id) })),
@@ -134,7 +140,10 @@ export async function getRoomView(tx: Tx, roomId: number, workspaceId?: number) 
 export async function copyWorkspace(tx: Tx, sourceId: number, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', sourceProposalId?: number, naming: Naming = 'refuse') {
   const src = await tx.workspace.findUnique({
     where: { id: sourceId },
-    include: { rooms: true, styles: true, roomStyles: true, structureOverrides: true, placements: { orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } } } } },
+    include: {
+      rooms: true, styles: true, roomStyles: true, structureOverrides: true, placements: { orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } } } },
+      fixtures: { orderBy: { id: 'asc' } }, wallStyles: { orderBy: { id: 'asc' } },
+    },
   });
   if (!src) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceId} not found`);
   // The copy covers the same rooms, so its name must be free in those rooms.
@@ -196,6 +205,18 @@ export async function copyWorkspace(tx: Tx, sourceId: number, name: string, crea
   }
   for (const st of await tx.roomStyle.findMany({ where: { workspaceId: ws.id } }))
     for (const old of src.roomStyles) if (room(old.roomId) === st.roomId) idMap.set(`room_style:${old.id}`, st.id);
+  // The design's own fixtures in Current rooms, and its wall colors and finishes.
+  for (const f of src.fixtures) {
+    const { id: fid, workspaceId: _w, roomId, wallId, ...fx } = f;
+    const nf = await tx.fixture.create({ data: { ...fx, workspaceId: ws.id, roomId: room(roomId), wallId: wallId != null ? idMap.get(`wall:${wallId}`) ?? wallId : null } });
+    idMap.set(`fixture:${fid}`, nf.id);
+    await copyMeasurements('fixture', fid, nf.id);
+  }
+  for (const st of src.wallStyles) {
+    const { id: sid, workspaceId: _w, wallId, ...rest } = st;
+    const ns = await tx.wallStyle.create({ data: { ...rest, workspaceId: ws.id, wallId: idMap.get(`wall:${wallId}`) ?? wallId } });
+    idMap.set(`wall_style:${sid}`, ns.id);
+  }
   const changes: RevChange[] = [{ op: 'create', entityType: 'workspace', entityId: ws.id }];
   await commitRevision(tx, {
     workspaceId: ws.id, kind: 'copy', actor: createdBy, changes,
@@ -242,5 +263,10 @@ export async function copyCurrentFurnishings(tx: Tx, workspaceId: number) {
   }
   const styles = await tx.roomStyle.findMany({ where: { workspaceId: null } });
   if (styles.length) await tx.roomStyle.createMany({ data: styles.map(({ id, workspaceId: _w, ...st }) => ({ ...st, workspaceId })) });
+  // Current's fixtures (fans, lights) and wall colors, so the design can change them.
+  const fixtures = await tx.fixture.findMany({ where: { workspaceId: null, room: { draftWorkspaceId: null } }, orderBy: { id: 'asc' } });
+  if (fixtures.length) await tx.fixture.createMany({ data: fixtures.map(({ id, workspaceId: _w, ...f }) => ({ ...f, workspaceId })) });
+  const walls = await tx.wallStyle.findMany({ where: { workspaceId: null } });
+  if (walls.length) await tx.wallStyle.createMany({ data: walls.map(({ id, workspaceId: _w, ...st }) => ({ ...st, workspaceId })) });
   return { placements: pls.length, styles: styles.length };
 }
