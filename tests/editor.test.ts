@@ -265,7 +265,7 @@ test('Current holds furniture and colors: only via approved proposals; direct sa
   F = ws.id;
   const lt = (await prisma.furnitureTemplate.findUniqueOrThrow({ where: { slug: 'l_sectional' } })).id;
   const s = await save(F, [
-    { op: 'create', entityType: 'furniture_item', tempRef: 'i1', fields: { kind: 'sofa', name: 'Sectional', wIn: 129, dIn: 101, hIn: 37, status: 'existing' } },
+    { op: 'create', entityType: 'furniture_item', tempRef: 'i1', fields: { kind: 'sofa', name: 'Sectional', wIn: 120, dIn: 90, hIn: 34, status: 'existing' } },
     { op: 'create', entityType: 'placement', tempRef: 'p1', fields: { roomId: fam, itemId: '$i1', xIn: 90, yIn: 110, rotationDeg: 0, action: 'existing', templateId: lt } },
     { op: 'create', entityType: 'placement_param', fields: { placementId: '$p1', key: 'chaiseSide', value: 'right' } },
     { op: 'create', entityType: 'placement_param', fields: { placementId: '$p1', key: 'ottomanSide', value: 'left' } },
@@ -296,14 +296,14 @@ test('Current holds furniture and colors: only via approved proposals; direct sa
   assert.equal(await prisma.roomStyle.count({ where: { workspaceId: null } }), 1);
   assert.equal(await prisma.placement.count({ where: { workspaceId: F } }), 3); // still all there
   // Template proposal on a Current placement: the target defaults to Current.
-  const pt = await mcp('propose_furniture_template', { placementId: curSofa, template: 'l_sectional', params: { chaiseDepthIn: 101, chaiseWidthIn: 44, ottomanWidthIn: 39, ottomanDepthIn: 26 }, rationale: 'Measured from the scan', source: { kind: 'bot' }, cost });
+  const pt = await mcp('propose_furniture_template', { placementId: curSofa, template: 'l_sectional', params: { chaiseDepthIn: 90, chaiseWidthIn: 40, ottomanWidthIn: 34, ottomanDepthIn: 28 }, rationale: 'Measured from the scan', source: { kind: 'bot' }, cost });
   assert.equal(pt.isError, false, pt.text);
   assert.equal(pt.data.target.kind, 'current');
   assert.equal((await mcp('propose_furniture_template', { workspaceId: F, placementId: curSofa, template: 'l_sectional', params: {}, rationale: 'x', source: { kind: 'bot' }, cost })).isError, true);
   ok(await http('POST', `/api/proposals/${pt.data.id}/approve`, {}));
   const params = await prisma.placementParam.findMany({ where: { placementId: curSofa } });
-  assert.equal(params.find((p) => p.key === 'chaiseWidthIn')!.value, '44');
-  assert.equal(params.find((p) => p.key === 'ottomanDepthIn')!.value, '26');
+  assert.equal(params.find((p) => p.key === 'chaiseWidthIn')!.value, '40');
+  assert.equal(params.find((p) => p.key === 'ottomanDepthIn')!.value, '28');
   // Current's view and history show it.
   const h = ok(await http('GET', '/api/current/history', undefined, 'read'));
   assert.equal(h[0].kind, 'proposal');
@@ -315,7 +315,7 @@ test('new designs start from Current (furniture, params, colors); blank ones do 
   const room = d.rooms.find((r: any) => r.id === fam);
   assert.deepEqual(room.furniture.map((f: any) => f.item.name).sort(), ['Sectional', 'TV']);
   const sect = room.furniture.find((f: any) => f.item.name === 'Sectional');
-  assert.equal(sect.template.slug, 'l_sectional'); assert.equal(sect.template.params.chaiseWidthIn, '44');
+  assert.equal(sect.template.slug, 'l_sectional'); assert.equal(sect.template.params.chaiseWidthIn, '40');
   assert.notEqual(sect.id, curSofa);
   assert.equal(room.style.wallColor, '#ddeeff');
   // Undo can't go past where the design started.
@@ -402,20 +402,22 @@ test('sectional merge: Michael\'s scan #1 geometry (private fixture, not in the 
   const path = 'fixtures/private/scan1-sofas.json';
   if (!existsSync(path)) { t.skip('fixtures/private/scan1-sofas.json is not present (real house data is never committed)'); return; }
   const fx = JSON.parse(readFileSync(path, 'utf8'));
+  const ex = fx.expected; // expected values live with the private data, not in this public repo
   // Furnish runs on the corrected (unmirrored) frame; check both.
   for (const objs of [fx.objects, unmirrorObjects({ walls: [{ startYIn: 0, endYIn: fx.maxY }], objects: fx.objects })]) {
     const { merged, rest } = mergeSectionals(objs);
     assert.equal(merged.length, 1, JSON.stringify(merged));
     const m = merged[0];
     assert.equal(m.keys.length, 3);
-    assert.deepEqual(rest.map((o: any) => [o.widthIn, o.depthIn]), [[58, 50]]); // the separate sofa 7.5" away
+    assert.deepEqual(rest.map((o: any) => [o.widthIn, o.depthIn]), ex.separate); // a separate sofa a few inches away
     assert.equal(m.name, 'L-sectional with ottoman (scanned, 3 pieces)');
-    assert.deepEqual([m.widthIn, m.depthIn], [129, 101]);
-    assert.deepEqual({ ...m.params }, { chaiseSide: m.params.chaiseSide, chaiseDepthIn: '101', chaiseWidthIn: '44', seatDepthIn: '32', cushionCount: '3', ottomanSide: m.params.chaiseSide === 'right' ? 'left' : 'right', ottomanWidthIn: '39', ottomanDepthIn: '26' });
+    assert.deepEqual([m.widthIn, m.depthIn], [ex.widthIn, ex.depthIn]);
+    assert.notEqual(m.params.ottomanSide, m.params.chaiseSide);
+    for (const k of ['chaiseDepthIn', 'chaiseWidthIn', 'seatDepthIn', 'cushionCount', 'ottomanWidthIn', 'ottomanDepthIn']) assert.equal(m.params[k], ex[k], k);
     const parts = m.keys.map((k: string) => objs.find((o: any) => o.key === k)).map((o: any) => ({ o, b: footprint(o) }));
-    const chaise = parts.find((p: any) => p.o.widthIn === 57)!, ott = parts.find((p: any) => p.o.widthIn === 26)!;
-    near(chaiseOf(m, 43), chaise.b, 3, 'chaise');
-    near(ottomanOf(m, 43), ott.b, 3, 'ottoman');
+    const chaise = parts.find((p: any) => p.o.widthIn === ex.chaiseWidth)!, ott = parts.find((p: any) => p.o.widthIn === ex.ottomanWidth)!;
+    near(chaiseOf(m, ex.runDepth), chaise.b, 3, 'chaise');
+    near(ottomanOf(m, ex.runDepth), ott.b, 3, 'ottoman');
   }
 });
 
