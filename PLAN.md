@@ -738,6 +738,29 @@ Approved by Michael (plan: nav-redesign.md, mockup states design / proposal / co
   and suggests "Name 2". Furnish from scan opens the design it already made (`workspaces.source_scan_id`).
 - Archive (`workspaces.archived_at`, migration 0007): hidden, read-only, restorable; refused while proposals are pending.
 
+### P10: Mood pieces on the plan **[Oct 18, 2026]**
+
+Approved by Michael: the 3D view and the data model show what makes a design's mood (bookmark designs #15–#17
+could only list these as cost lines).
+- 26 new templates (40 in all) in the template tables, with `template_groups` (Furniture, Lighting, Wall decor,
+  Soft goods and plants), a mount (floor, wall, ceiling, surface, soft), a typical price range and a description
+  (migration 0009). Lighting: pendant, plug-in swag cluster, wall sconce, swing-arm lamp, table lamp, floor lamp
+  (arc, pleated, cone, globe), LED strip/cove, ceiling fan. Wall decor: framed art, gallery grid, sculptural disk,
+  arched/round mirror, paneling (slats, wainscot with ledge, board and batten, fluted), lit niche/built-in.
+  Soft goods: curtains/sheers, plants in planters, pillows, throws. Furniture: console, dining/café chair, café or
+  dining table at 29", wood-frame lounge chair, glass or fluted display cabinet, TV (size from the screen), electric
+  fireplace, pouf, drum/stump side table.
+- Per-wall color and finish (`wall_styles`, paint or limewash) per workspace; Save to Current and Current proposals
+  carry them; a scan keeps walls that have one.
+- Fixtures in designs: `fixtures.workspace_id`. A design copied from Current gets its own copies of Current's
+  fixtures and can add or change fixtures in the Current rooms it links (fixes "room N isn't a room of workspace").
+  Save to Current does not move fixtures (they are structure, from scans).
+- MCP: `propose_pieces` (templated pieces; wall pieces by `{wallId, offsetIn}`; `replacesPlacementId` for a fan →
+  pendant swap) and `propose_wall_finish`. Proposals return `planCost` (own price, else the typical range, plus
+  $40–250 per painted wall, $90–450 per limewashed wall).
+- Editor: grouped Add menu, wall snapping, ceiling and surface stacking, Swap for a pendant, Walls section, cost ranges
+  in Compare, Evening toggle. Lights: emissive shades plus at most 4 shadowless point lights for the strongest lights.
+
 ## 12. Open questions for Michael
 
 Answered and folded in: storage (Railway + MySQL, fully relational), furniture (MySQL only),

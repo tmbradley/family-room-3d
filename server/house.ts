@@ -30,7 +30,7 @@ export async function getHouse(houseId?: number) {
 export async function exportHouse() {
   const house = await getHouse();
   const [workspaces, items, proposals, measurements, revisions] = await Promise.all([
-    prisma.workspace.findMany({ include: { rooms: true, styles: true, structureOverrides: true, placements: true } }),
+    prisma.workspace.findMany({ include: { rooms: true, styles: true, roomStyles: true, wallStyles: true, fixtures: true, structureOverrides: true, placements: { include: { params: true } } } }),
     prisma.furnitureItem.findMany(),
     prisma.proposal.findMany({ include: { rooms: true, changes: true, comments: true, costSteps: true } }),
     prisma.measurement.findMany(),

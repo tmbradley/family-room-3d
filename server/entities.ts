@@ -14,7 +14,7 @@ export type FieldSpec =
   | { type: 'bool'; system?: boolean }
   | { type: 'enum'; values: readonly string[]; nullable?: boolean; system?: boolean };
 
-export type EntityType = 'placement' | 'placement_param' | 'room_style' | 'furniture_item' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
+export type EntityType = 'placement' | 'placement_param' | 'room_style' | 'wall_style' | 'furniture_item' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
 
 const SRC = ['manual_estimate', 'measured', 'scan', 'manual'] as const;
 const color = { type: 'str', nullable: true, max: 9 } as const;
@@ -23,7 +23,7 @@ const hexColor = { type: 'str', nullable: true, max: 7, hex: true } as const;
 const inches = (min = -100000, max = 100000) => ({ type: 'int', min, max }) as const;
 
 type Def = {
-  model: 'placement' | 'placementParam' | 'roomStyle' | 'furnitureItem' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
+  model: 'placement' | 'placementParam' | 'roomStyle' | 'wallStyle' | 'furnitureItem' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
   label: string;
   fields: Record<string, FieldSpec>;
   required: string[]; // for create
@@ -70,6 +70,18 @@ export const ENTITIES: Record<EntityType, Def> = {
       trimColorName: { type: 'str', nullable: true, max: 60 }, trimColor: hexColor,
       floorColorName: { type: 'str', nullable: true, max: 60 }, floorColor: hexColor,
       deviceColorName: { type: 'str', nullable: true, max: 60 }, deviceColor: hexColor,
+    },
+  },
+  wall_style: {
+    // One wall's color and finish in this workspace (accent wall, limewash). Wins over the room's wall color.
+    model: 'wallStyle', label: 'Wall color and finish for one wall in this workspace (accent wall, limewash)', create: true, delete: true, pinnable: [],
+    required: ['wallId'],
+    fields: {
+      workspaceId: { type: 'int', nullable: true, system: true },
+      wallId: { type: 'int', ref: 'wall' },
+      colorName: { type: 'str', nullable: true, max: 60 }, color: hexColor,
+      finish: { type: 'enum', values: ['paint', 'limewash'] },
+      notes: { type: 'str', nullable: true, max: 500 },
     },
   },
   furniture_item: {
@@ -128,9 +140,11 @@ export const ENTITIES: Record<EntityType, Def> = {
     },
   },
   fixture: {
-    model: 'fixture', label: 'Fixture (fan, light, outlet, ...)', create: true, delete: true, pinnable: ['xIn', 'yIn'],
+    // In a design, fixtures can sit in the Current rooms it links (they belong to the design).
+    model: 'fixture', label: 'Fixture (fan, light, outlet, ...); for lights and fans you can also place a lighting template', create: true, delete: true, pinnable: ['xIn', 'yIn'],
     required: ['roomId', 'type', 'name'],
     fields: {
+      workspaceId: { type: 'int', nullable: true, system: true },
       roomId: { type: 'int', ref: 'room' }, wallId: { type: 'int', nullable: true, ref: 'wall' },
       type: { type: 'enum', values: ['ceiling_fan', 'light', 'outlet', 'switch', 'window_treatment', 'other'] },
       name: { type: 'str', max: 120 }, color,
@@ -207,6 +221,7 @@ export async function ownerOf(tx: Tx, entityType: string, row: any): Promise<num
   switch (entityType) {
     case 'placement': return row.workspaceId;
     case 'room_style': return row.workspaceId;
+    case 'wall_style': return row.workspaceId;
     case 'placement_param': {
       const p = await tx.placement.findUnique({ where: { id: row.placementId }, select: { workspaceId: true } });
       return p?.workspaceId ?? null;
@@ -214,8 +229,10 @@ export async function ownerOf(tx: Tx, entityType: string, row: any): Promise<num
     case 'furniture_item': return 'global';
     case 'workspace': return row.id;
     case 'room': return row.draftWorkspaceId;
-    case 'wall':
-    case 'fixture': {
+    case 'fixture':
+      if (row.workspaceId != null) return row.workspaceId;
+    // falls through: Current's fixture, or a draft room's own
+    case 'wall': {
       const room = await tx.room.findUnique({ where: { id: row.roomId }, select: { draftWorkspaceId: true } });
       return room?.draftWorkspaceId ?? null;
     }

@@ -25,6 +25,14 @@ Where this is headed: [PLAN.md](PLAN.md).
   On a phone the sidebar slides in and the details panel is a bottom sheet.
 - **Designs:** click the name in the breadcrumb to rename; the ⋯ menu renames, duplicates, exports or archives.
   Names are unique per room. Archived designs are read-only and can be restored; nothing is deleted.
+- **Add furniture** is grouped: Furniture, Lighting, Wall decor, Soft goods and plants (40 parametric templates
+  in the template tables), plus Catalog and Custom box. Wall pieces (art, mirrors, sconces, curtains, paneling,
+  TV) hang on the nearest wall facing the room and slide along or to another wall when dragged; pendants and
+  fans hang from the ceiling; lamps and plants sit on the table under them; pillows and throws sit on the sofa.
+  A selected ceiling fan has **Swap for a pendant**. **🌙 Evening** dims the daylight so the lamps light the room
+  (a few real warm lights, the rest glow).
+- **Walls** (Details, no piece selected): give one wall its own color and finish (paint or limewash), e.g. an
+  accent wall. Costs in Compare count new pieces at their price, else the template's typical range, plus wall finishes.
 - **Compare** shows a design next to Current, another design or a proposal, with added / changed / removed
   marks. **Save to Current…** shows what goes in and what stays an idea; confirming it is the approval.
   Approving shows an Undo toast; History rollback still works.
@@ -40,7 +48,7 @@ Michael only: `POST /api/workspaces`, `/api/workspaces/:id/changes`, `/api/works
 `/api/workspaces/:id/revert` (undo/redo), `/api/workspaces/:id/propose-as-current`, `GET|POST /api/workspaces/:id/save-to-current`,
 `/api/workspaces/:id/archive`, `/api/proposals/:id/undo-approve`, `/api/measurements/:id/withdraw`.
 Read: `GET /api/scans[/:id]`, `GET /api/current/history`, `GET /api/photos?roomId=|scanImportId=` (signed URLs, 10 min),
-`GET /api/templates`, `GET /api/models/:id[/file]`. Pairing code only (iPhone app): `/api/upload-tokens/validate|room`,
+`GET /api/templates` (groups, mount, typical price), `GET /api/models/:id[/file]`. Pairing code only (iPhone app): `/api/upload-tokens/validate|room`,
 `/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`, `/api/models/import`, `/api/suggestions`. Current changes only through promoted scans,
 measurements, approved proposals (furniture and colors only) and rollbacks.
 MCP: `POST /mcp` (see PLAN.md section 10).

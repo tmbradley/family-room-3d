@@ -16,6 +16,7 @@ import { createProposal, listProposals, getProposal, proposalShape } from './pro
 import { listPhotos } from './photos.js';
 import { getScanImport } from './scans.js';
 import { listTemplates, templateBySlug } from './templates.js';
+import { extraChanges, pieceOps, pieceSchema, wallFinishOps, wallFinishSchema } from './pieces.js';
 
 type Scope = 'read' | 'propose' | 'admin';
 const rank: Record<Scope, number> = { read: 0, propose: 1, admin: 2 };
@@ -28,7 +29,14 @@ start from Current's furniture and colors, and change them freely.
 Photos from the iPhone are in list_room_photos (signed URLs valid a few minutes; call again for fresh ones).
 You can read and propose. You can never change a design directly: create_proposal records a pending
 change request that Michael approves or rejects in the editor. Every proposal needs a rationale, its
-source (e.g. the X post URL), and a step-by-step low/high cost in USD. Pinned measurements can't be changed.`;
+source (e.g. the X post URL), and a step-by-step low/high cost in USD. Pinned measurements can't be changed.
+What makes a design's mood goes on the plan, not only in cost lines: lighting (pendants, swag pendant clusters,
+sconces, swing-arm lamps, table and floor lamps, LED strips and coves, ceiling fans), wall decor (framed art,
+gallery walls, sculptural disks, mirrors, paneling, lit niches), soft goods and plants (curtains and sheers,
+plants, pillows, throws) and furniture are parametric templates (list_templates: group, mount, parameters,
+typical price). Add them with propose_pieces; wall pieces take {wallId, offsetIn}. Accent walls and limewash are
+per-wall (wall_style, propose_wall_finish). Every proposal shows planCost: the pieces drawn on the plan at their
+price, or the template's typical range.`;
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
 
@@ -77,7 +85,7 @@ function buildServer(scope: Scope, agentKeyId: number) {
     inputSchema: { scanImportId: z.number().int() }, annotations: ro,
   }, ({ scanImportId }) => guard(async () => { const { preview, ...rest } = await getScanImport(scanImportId); return rest; }));
   server.registerTool('list_templates', {
-    title: 'List furniture templates', description: 'The parametric furniture library: template ids/slugs, default sizes, RoomPlan categories they stand in for, and each parameter with its type, default, range or options.',
+    title: 'List furniture templates', description: 'The parametric library (furniture, lighting, wall decor, soft goods and plants): template ids/slugs, group, mount (floor, wall = hung on a wall at a height, ceiling, surface = sits on the furniture under it, soft = on a seat), default sizes in inches, typical price range, RoomPlan categories they stand in for, and each parameter with its type, default, range or options.',
     annotations: ro,
   }, () => guard(() => listTemplates(prisma)));
   server.registerTool('list_models', {
@@ -179,6 +187,49 @@ The whole change list is validated before it's stored; pinned measurements are r
       const tg = target(a, pl.workspaceId);
       if (tg.workspaceId !== pl.workspaceId) throw new Error(`placement ${pl.id} is in ${pl.workspaceId == null ? 'Current' : `workspace ${pl.workspaceId}`}, not ${tg.current ? 'Current' : `workspace ${tg.workspaceId}`}`);
       return propose(a.modelId == null ? `${pl.item.name}: remove 3D model` : `${pl.item.name}: use 3D model #${a.modelId}`, [pl.roomId], ops, a, tg);
+    }));
+
+    // Where a proposal goes: a workspace, Current, or a new design copied from a workspace.
+    const where = {
+      workspaceId: z.number().int().optional().describe('Design (workspace) to change'),
+      current: z.boolean().optional().describe('Propose for Current instead (the house as it is now)'),
+      newWorkspace: z.object({ name: z.string().min(1).max(120), copyFromWorkspaceId: z.number().int() }).optional()
+        .describe('Propose a new design, copied from this workspace when approved; ids refer to that workspace'),
+      title: z.string().min(3).max(200), rationale: proposalShape.rationale, source: proposalShape.source, cost: proposalShape.cost, photoIds: proposalShape.photoIds,
+      roomIds: z.array(z.number().int()).min(1).max(20).optional().describe('Rooms it is about (defaults to the rooms of the pieces/walls)'),
+    };
+    const fileIt = (a: any, roomIds: number[], changes: any[]) => {
+      const n = [a.workspaceId != null, a.current === true, a.newWorkspace != null].filter(Boolean).length;
+      if (n !== 1) throw new Error('Pass exactly one of workspaceId, current: true or newWorkspace');
+      return createProposal({
+        title: a.title, rationale: a.rationale, source: a.source, cost: a.cost, photoIds: a.photoIds, roomIds: a.roomIds ?? [...new Set(roomIds)], changes,
+        ...(a.current ? { current: true } : a.newWorkspace ? { newWorkspace: a.newWorkspace } : { workspaceId: a.workspaceId }),
+      }, { actor: 'agent', agentKeyId });
+    };
+    const scopeWs = (a: any): number | null => (a.current ? null : a.newWorkspace ? a.newWorkspace.copyFromWorkspaceId : a.workspaceId ?? null);
+
+    server.registerTool('propose_pieces', {
+      title: 'Propose pieces on the plan',
+      description: `Propose adding templated pieces (lighting, wall decor, soft goods and plants, furniture; see list_templates) to a design, Current or a new design, in one proposal. Each piece becomes a catalog item with its price (or the template's typical range in planCost), a placement drawn by the template, and its parameter values. Wall pieces: pass wall {wallId, offsetIn} and it is hung against that wall facing into the room (height comes from its height parameter, e.g. mountHeightIn, rodHeightIn, centerHeightIn). Ceiling pieces (pendant, swag_pendants, ceiling_fan) take xIn/yIn and hang from the ceiling (dropIn). Surface pieces (table_lamp, plant) sit on the furniture under them; soft pieces (pillows, throw_blanket) lie on the sofa or chair under them. To swap the ceiling fan for a pendant: add the pendant with replacesPlacementId = the fan's placement and, in changes, mark the fan {"op":"update","entityType":"placement","entityId":FAN,"field":"action","value":"replace"}. changes holds any other edits (same format as create_proposal). Creates a pending proposal only.`,
+      inputSchema: { ...where, pieces: z.array(pieceSchema).min(1).max(30), changes: extraChanges },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, (a) => guard(async () => {
+      const ops = [...(await pieceOps(a.pieces)), ...(a.changes ?? [])];
+      return fileIt(a, a.pieces.map((p) => p.roomId), ops);
+    }));
+
+    server.registerTool('propose_wall_finish', {
+      title: 'Propose wall colors and finishes',
+      description: 'Propose a color and finish (paint or limewash) for single walls: accent walls, a limewashed media wall. Wins over the room wall color for those walls. Works in a design, for Current (current: true) or a new design. clear: true removes a wall\'s own color. Creates a pending proposal only.',
+      inputSchema: { ...where, roomId: z.number().int(), walls: z.array(wallFinishSchema).min(1).max(20), changes: extraChanges },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, (a) => guard(async () => {
+      const walls = await prisma.wall.findMany({ where: { roomId: a.roomId }, select: { id: true } });
+      const bad = a.walls.find((w) => !walls.some((x) => x.id === w.wallId));
+      if (bad) throw new Error(`wall ${bad.wallId} isn't a wall of room ${a.roomId}. Walls: ${walls.map((w) => w.id).join(', ')}`);
+      const ops = [...(await wallFinishOps(scopeWs(a), a.walls)), ...(a.changes ?? [])];
+      if (!ops.length) throw new Error('Nothing to change');
+      return fileIt(a, [a.roomId], ops);
     }));
   }
   return server;

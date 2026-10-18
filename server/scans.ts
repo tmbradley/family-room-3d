@@ -337,7 +337,7 @@ export async function promoteIn(tx: Tx, id: number, actor: 'michael') {
   const { label, scan } = fromRows(si.data);
   if (!scan.walls.length) throw new ApiError(400, 'invalid_scan', 'The scan has no walls');
 
-  let room = si.roomId != null ? await tx.room.findUnique({ where: { id: si.roomId }, include: { walls: { include: { openings: true, fixtures: { select: { id: true } } } } } }) : null;
+  let room = si.roomId != null ? await tx.room.findUnique({ where: { id: si.roomId }, include: { walls: { include: { openings: true, fixtures: { select: { id: true } }, styles: { select: { id: true } } } } } }) : null;
   if (room && room.draftWorkspaceId !== null) throw new ApiError(409, 'not_current', 'This scan targets a draft room; scans only promote into Current rooms');
   if (room && room.planFrame != null && room.planFrame !== si.planFrame)
     throw new ApiError(409, 'mirrored_room', `${room.label} was built from an older scan that drew it as a mirror image. Fix it first (Review panel: "Fix mirror image"), then promote this scan.`);
@@ -438,8 +438,8 @@ export async function promoteIn(tx: Tx, id: number, actor: 'michael') {
       if (usedW.has(wi)) continue;
       if (ew.isOpen) { kept.push(`wall ${ew.id} (open edge)`); continue; }
       const pinnedOpening = await Promise.all(ew.openings.map((o) => anyPin(tx, 'opening', o.id, openingFields)));
-      if (ew.fixtures.length || ew.openings.some((o) => o.type === 'fireplace') || pinnedOpening.some(Boolean) || (await anyPin(tx, 'wall', ew.id, wallFields))) {
-        kept.push(`wall ${ew.id} (not in scan, but has pins, fixtures or a fireplace)`); continue;
+      if (ew.fixtures.length || ew.styles.length || ew.openings.some((o) => o.type === 'fireplace') || pinnedOpening.some(Boolean) || (await anyPin(tx, 'wall', ew.id, wallFields))) {
+        kept.push(`wall ${ew.id} (not in scan, but has pins, fixtures, a wall color or a fireplace)`); continue;
       }
       for (const o of ew.openings) ops.push({ op: 'delete', entityType: 'opening', entityId: o.id });
       ops.push({ op: 'delete', entityType: 'wall', entityId: ew.id });

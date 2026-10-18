@@ -42,6 +42,8 @@ body.noinsp #insp { display: none; }
 .pop .hd { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #8a7d70; padding: 8px 10px 4px; }
 .pop .empty { color: #8a7d70; padding: 8px 10px; }
 .pop .ptabs { display: flex; gap: 2px; margin-bottom: 6px; }
+.pop .ptabs.wrap { flex-wrap: wrap; }
+.pop .ptabs.wrap button { flex: 1 1 auto; white-space: nowrap; }
 .pop .ptabs button { flex: 1; border: none; background: none; padding: 6px; border-radius: 7px; font-weight: 600; color: #7a7067; cursor: pointer; }
 .pop .ptabs button.on { background: #3b2f26; color: #fff; }
 
@@ -164,6 +166,8 @@ td.num { text-align: right; white-space: nowrap; }
 .src.manual { background: #3b2f26; color: #fff; }
 .src.measured, .src.scan { background: #d4f0de; color: #17643a; }
 .colors { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; align-items: center; font-size: 12px; }
+.colors .wf { display: flex; gap: 4px; align-items: center; }
+.colors .wf select { font-size: 12px; padding: 2px; }
 .colors input[type=color] { width: 36px; height: 24px; padding: 0; border: 1px solid #cfc5b8; border-radius: 4px; }
 .colors > span:nth-child(odd) { color: #7a7067; }
 

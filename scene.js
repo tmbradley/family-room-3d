@@ -5,6 +5,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { USDLoader } from 'three/addons/loaders/USDLoader.js';
+import { DECOR, buildFixture, limewashTex, wallPose, nearestWall } from './decor.js';
+export { wallPose, nearestWall };
 
 const CUT = 3;            // cutaway wall height (ft)
 const SNAP_FT = 0.25;     // 3"
@@ -146,9 +148,19 @@ const BUILDERS = {
 // Parametric templates (server/templates.ts). Same local frame as above; params arrive as strings.
 // ---------------------------------------------------------------------------
 let TEMPLATE_DEFAULTS = new Map(); // slug -> { key: default }
+let TEMPLATE_MOUNT = new Map();    // slug -> floor | wall | ceiling | surface | soft
 export function setTemplates(list) {
   TEMPLATE_DEFAULTS = new Map(list.map((t) => [t.slug, Object.fromEntries(t.params.map((p) => [p.key, p.default]))]));
+  TEMPLATE_MOUNT = new Map(list.map((t) => [t.slug, t.mount ?? 'floor']));
 }
+/** How a placement is held: on the floor, on a wall, from the ceiling, on the furniture under it (surface), or on a seat (soft). */
+export function mountOf(p) {
+  const slug = p?.template?.slug; if (!slug) return 'floor';
+  const m = TEMPLATE_MOUNT.get(slug) ?? 'floor';
+  if (slug === 'tv') return ({ ...(TEMPLATE_DEFAULTS.get('tv') ?? {}), ...p.template.params }).mount === 'stand' ? 'surface' : 'wall';
+  return m;
+}
+const MAX_LIGHTS = 4;
 const WOOD = { walnut: '#5a3a22', oak: '#a87a4a', white_oak: '#c9a978', ebony: '#2a201b', painted_white: '#efece6' };
 const METAL = { brass: '#b8913f', black: '#1d1d1d', chrome: '#c9ccd0', bronze: '#6e4b2e' };
 const woodMat = (prm) => mat(WOOD[prm.woodTone] ?? WOOD.walnut, { roughness: 0.55 });
@@ -257,15 +269,6 @@ const TEMPLATE_BUILDERS = {
     if (pattern === 'solid') { const m = box(w, 0.04, d, mat(color, { roughness: 1 }), 0, 0.003, 0); m.castShadow = false; g.add(m); return; }
     BUILDERS.rug(g, w, d, h, { color, accentColor: '#3d3a36', ...(pattern === 'border' ? { accent: '#3d3a36' } : {}) });
   },
-  floor_lamp(g, w, d, h, prm) {
-    const met = metalMat(prm), shadeM = mat(prm.shadeColor || '#efe7d8', { side: THREE.DoubleSide, emissive: '#5a4a30', emissiveIntensity: 0.4 });
-    const base = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.4, w * 0.45, 0.08, 24), met); base.position.y = 0.04; g.add(base);
-    if (prm.arc === 'true') {
-      const curve = new THREE.QuadraticBezierCurve3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, h * 1.1, 0), new THREE.Vector3(0, h * 0.85, d / 2 + 2.5));
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, 0.03, 8), met); tube.castShadow = true; g.add(tube);
-      const shade = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), shadeM); shade.position.set(0, h * 0.85 - 0.5, d / 2 + 2.5); g.add(shade);
-    } else BUILDERS.lamp(g, w, d, h, { color: METAL[prm.metalFinish] ?? METAL.brass });
-  },
   bed(g, w, d, h, prm) {
     const fab = mat(prm.fabricColor, { roughness: 0.95 }), wood = woodMat(prm);
     const base = templateLegs(g, w, d, { ...prm, legStyle: 'block' }, wood, 0.2);
@@ -304,12 +307,25 @@ const TEMPLATE_BUILDERS = {
   },
 };
 /** Build a placement's template (params over template defaults). Returns false if unknown. */
-function buildTemplate(g, p, it) {
-  const t = p.template, f = t && TEMPLATE_BUILDERS[t.slug];
+function buildTemplate(g, p, it, ctx) {
+  const t = p.template, f = t && (DECOR[t.slug] ?? TEMPLATE_BUILDERS[t.slug]);
   if (!f) return false;
   const prm = { ...(TEMPLATE_DEFAULTS.get(t.slug) ?? {}), ...t.params };
-  f(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), prm, it);
+  f(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), prm, ctx);
   return true;
+}
+/** ctx for builders: ceiling height, a seed, and light markers (the view lights the few that matter). */
+function buildCtx(g, ceilFt, seed) {
+  return {
+    ceil: ceilFt, seed,
+    light(x, y, z, color, weight = 1) { const o = new THREE.Object3D(); o.position.set(x, y, z); o.userData.light = { color, weight }; g.add(o); },
+  };
+}
+const wallStyleMats = new Map();
+function wallStyleMat(st) {
+  const key = `${st.color}|${st.finish}`;
+  if (!wallStyleMats.has(key)) wallStyleMats.set(key, st.finish === 'limewash' ? mat('#ffffff', { map: limewashTex(st.color), roughness: 1 }) : mat(st.color, { roughness: 0.9 }));
+  return wallStyleMats.get(key);
 }
 
 // 3D models (Object Capture USDZ or uploaded GLB/USDZ), fetched same-origin, cached per file.
@@ -375,7 +391,11 @@ export class RoomView {
     this.camera = this.persp; this.controls = this.pc;
     for (const c of [this.pc, this.oc]) c.addEventListener('change', () => { if (this.userDriving) this.h.onCamera?.(this); });
 
-    this.scene.add(new THREE.HemisphereLight('#fff7ea', '#8a6a4a', 1.4));
+    this.hemi = new THREE.HemisphereLight('#fff7ea', '#8a6a4a', 1.4); this.scene.add(this.hemi);
+    // A fixed pool of warm point lights (no shadows) that follow the most important lit pieces;
+    // every other light is emissive only. A fixed count keeps shaders from recompiling.
+    this.pool = Array.from({ length: MAX_LIGHTS }, () => { const l = new THREE.PointLight('#ffc184', 0, 18, 2); l.castShadow = false; l.userData.marker = null; this.scene.add(l); return l; });
+    this.evening = false;
     this.sun = new THREE.DirectionalLight('#fff3e0', 1.6); this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048); this.sun.shadow.bias = -0.0005;
     this.scene.add(this.sun, this.sun.target);
@@ -392,6 +412,7 @@ export class RoomView {
       this.controls.update();
       this.updateWallVisibility();
       if (this.selHelper) this.selHelper.update();
+      for (const l of this.pool) if (l.userData.marker) l.userData.marker.getWorldPosition(l.position);
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.scene, this.camera);
       this.h.onFrame?.(this);
@@ -466,7 +487,17 @@ export class RoomView {
     for (const w of r.walls) {
       const a = [ox + ft(w.startXIn), oz + ft(w.startYIn)], b = [ox + ft(w.endXIn), oz + ft(w.endYIn)];
       if (w.isOpen) this.buildOpenEdge(a, b, w, ctx, floorColor);
-      else this.buildWall(a, b, w, ctx);
+      // An accent wall or a limewashed wall: this workspace's color and finish for this wall.
+      else this.buildWall(a, b, w, w.style?.color ? { ...ctx, wallMat: wallStyleMat(w.style) } : ctx);
+    }
+    // Ceiling fans and lights from the scan or Current (fixtures): drawn, not draggable.
+    for (const f of r.fixtures ?? []) {
+      if (!['ceiling_fan', 'light'].includes(f.type) || f.xIn == null || f.yIn == null) continue;
+      const g = new THREE.Group();
+      buildFixture(g, f, buildCtx(g, H, f.id));
+      g.position.copy(W(ox + ft(f.xIn), oz + ft(f.yIn)));
+      g.traverse((o) => { o.userData.static = true; });
+      this.roomRoot.add(g);
     }
   }
 
@@ -570,12 +601,18 @@ export class RoomView {
 
   buildFurniture() {
     this.clearGroup(this.furnRoot); this.objects.clear();
-    for (const r of this.data?.rooms ?? []) for (const p of r.furniture) {
+    const stacked = [];
+    for (const r of this.data?.rooms ?? []) {
+    // Pieces another piece replaces (a fan swapped for a pendant) are drawn as ghosts.
+    const replaced = new Set(r.furniture.filter((f) => f.replacesPlacementId != null && !f._removed && f.action !== 'remove').map((f) => f.replacesPlacementId));
+    for (const p of r.furniture) {
       const it = p.item, g = new THREE.Group();
-      if (!buildTemplate(g, p, it)) (BUILDERS[it.kind] || BUILDERS.box)(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), it);
+      if (!buildTemplate(g, p, it, buildCtx(g, ft(r.ceilingIn || 96), p.id))) (BUILDERS[it.kind] || BUILDERS.box)(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), it);
+      g.userData.mount = mountOf(p);
       const mark = p._removed ? 'removed' : this.marks?.[`placement:${p.id}`] ?? this.marks?.[`furniture_item:${it.id}`]
         ?? (this.highlight.has(`placement:${p.id}`) || this.highlight.has(`furniture_item:${it.id}`) ? 'added' : null);
-      const ghost = p.action === 'remove' || mark === 'removed';
+      const ghost = p.action === 'remove' || mark === 'removed' || replaced.has(p.id);
+      g.userData.ghost = ghost;
       g.traverse((o) => {
         o.userData.pid = p.id;
         if (ghost && o.isMesh) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.25; o.castShadow = false; }
@@ -596,22 +633,86 @@ export class RoomView {
           if (this.selected === p.id) this.select(p.id);
         }).catch((err) => { console.warn('model', p.model.fileUrl, err); badge.textContent = 'custom model (showing template)'; badge.classList.add('failed'); });
       }
+      // Label just above what was drawn (wall art at its height, a pendant under the ceiling).
+      g.updateMatrixWorld(true);
+      const bb = new THREE.Box3();
+      g.traverse((o) => { if (o.isMesh && !o.userData.halo) bb.expandByObject(o); });
+      const top = bb.isEmpty() ? Math.max(ft(it.hIn), 0.3) : bb.max.y;
+      if (g.userData.mount === 'wall' && !bb.isEmpty()) {
+        // Wall pieces are a line from above: an invisible strip in front of the wall makes them easy to tap in the top view.
+        const proxy = new THREE.Mesh(new THREE.BoxGeometry(Math.max(bb.max.x - bb.min.x, 0.4), 0.05, 0.6), new THREE.MeshBasicMaterial({ visible: false }));
+        proxy.position.set((bb.min.x + bb.max.x) / 2, top, -ft(it.dIn) / 2 + 0.3); proxy.userData.pid = p.id; proxy.userData.proxy = true; g.add(proxy);
+      }
       const lbl = new CSS2DObject(div);
-      lbl.position.set(0, Math.max(ft(it.hIn), 0.3) + 0.35 + (it.kind === 'tv' ? 2 : 0), it.kind === 'rug' ? ft(it.dIn) / 2 - 1 : 0);
+      lbl.position.set(0, top + 0.35, it.kind === 'rug' ? ft(it.dIn) / 2 - 1 : 0);
       g.add(lbl); g.userData.labelEl = div;
       if (mark) {
         const hl = new THREE.BoxHelper(g, MARK_COLORS[mark] ?? MARK_COLORS.added); g.userData.hl = hl;
       }
       this.objects.set(p.id, g); this.furnRoot.add(g); this.place(p);
+      if (g.userData.mount === 'surface' || g.userData.mount === 'soft') stacked.push(p);
       if (g.userData.hl) { g.updateMatrixWorld(true); g.userData.hl.update(); this.furnRoot.add(g.userData.hl); }
     }
+    }
+    // Lamps, plants and pillows go on top of what's under them, once everything else stands.
+    for (const p of stacked) this.place(p);
+    this.assignLights();
+  }
+  /** Turn the most important lit pieces into the pool's real lights. */
+  assignLights() {
+    const marks = [];
+    for (const root of [this.furnRoot, this.roomRoot]) root.traverse((o) => {
+      if (!o.userData.light) return;
+      let a = o, ghost = false; while (a) { if (a.userData.ghost) ghost = true; a = a.parent; }
+      if (!ghost) marks.push(o);
+    });
+    marks.sort((a, b) => b.userData.light.weight - a.userData.light.weight);
+    this.pool.forEach((l, i) => {
+      const m = marks[i]; l.userData.marker = m ?? null;
+      if (m) { l.color.set(m.userData.light.color); m.getWorldPosition(l.position); }
+      l.intensity = m ? this.lightIntensity(m.userData.light.weight) : 0;
+    });
+  }
+  lightIntensity(weight) { return (this.evening ? 9 : 4) * (weight >= 3 ? 1.3 : weight >= 2 ? 1 : 0.6); }
+  /** Evening: dim the daylight so the lamps carry the room. */
+  setEvening(on) {
+    this.evening = !!on;
+    this.hemi.intensity = on ? 0.32 : 1.4; this.sun.intensity = on ? 0.08 : 1.6;
+    this.scene.background.set(on ? '#2a2520' : '#ece8e2');
+    for (const l of this.pool) if (l.userData.marker) l.intensity = this.lightIntensity(l.userData.marker.userData.light.weight);
   }
   place(p) {
     const g = this.objects.get(p.id); if (!g) return;
     const r = this.roomOf(p);
     g.position.copy(W(ft(r.originXIn + p.xIn), ft(r.originYIn + p.yIn)));
     g.rotation.y = THREE.MathUtils.degToRad(p.rotationDeg);
+    const m = g.userData.mount;
+    if (m === 'surface' || m === 'soft') g.position.y = this.surfaceUnder(p, g);
     if (g.userData.hl) { g.updateMatrixWorld(true); g.userData.hl.update(); }
+  }
+  /** Top of the floor-standing furniture under a surface piece (or the seat in front of a pillow row); 0 = the floor. */
+  surfaceUnder(p, g) {
+    const hosts = [];
+    for (const q of this.roomOf(p).furniture) {
+      if (q.id === p.id) continue;
+      const hg = this.objects.get(q.id);
+      if (!hg || hg.userData.ghost || hg.userData.mount !== 'floor' || q.item.kind === 'rug') continue;
+      hg.updateMatrixWorld(true); hosts.push(hg);
+    }
+    if (!hosts.length) return 0;
+    // Pillows lean on the seat back: probe the seat a little in front of them.
+    const fwd = p.template?.slug === 'pillows' ? ft(p.item.dIn) / 2 + 0.6 : 0, a = g.rotation.y;
+    const o = new THREE.Vector3(g.position.x + Math.sin(a) * fwd, 30, g.position.z + Math.cos(a) * fwd);
+    this.raycaster.set(o, new THREE.Vector3(0, -1, 0));
+    const hit = this.raycaster.intersectObjects(hosts, true).find((h) => h.object.isMesh && !h.object.userData.halo && !(h.object.material?.transparent && h.object.material.opacity < 0.5));
+    return hit ? hit.point.y : 0;
+  }
+  /** Hang a wall piece on the closed wall nearest (xIn, yIn), facing into the room. */
+  snapToWall(p, xIn, yIn) {
+    const r = this.roomOf(p), nw = nearestWall(r.walls, xIn, yIn, p.item.wIn);
+    if (!nw) { p.xIn = Math.round(xIn); p.yIn = Math.round(yIn); return; }
+    const pose = wallPose(r.walls, nw.wall.id, this.snap ? Math.round(nw.offsetIn / 3) * 3 : nw.offsetIn, p.item.dIn);
+    if (pose) Object.assign(p, pose);
   }
 
   // ---- selection / editing --------------------------------------------------
@@ -647,6 +748,7 @@ export class RoomView {
   }
   rotateSelected() {
     const p = this.selected != null && this.placement(this.selected); if (!p || !this.editable) return;
+    if (mountOf(p) === 'wall') return; // wall pieces face the room; drag them to another wall instead
     const before = { xIn: p.xIn, yIn: p.yIn, rotationDeg: p.rotationDeg };
     p.rotationDeg = (p.rotationDeg + 90) % 360; this.snapP(p); this.clampP(p); this.place(p);
     this.h.onCommit?.(this, p, before);
@@ -660,7 +762,7 @@ export class RoomView {
       this.raycaster.setFromCamera(this.ndc, this.camera);
     };
     const floorHit = () => { const p = new THREE.Vector3(); return this.raycaster.ray.intersectPlane(this.floorPlane, p) ? { x: p.x, z: -p.z } : null; };
-    const pick = () => this.raycaster.intersectObjects(this.furnRoot.children, true).filter((h) => h.object.userData.pid != null && h.object.isMesh);
+    const pick = () => this.raycaster.intersectObjects(this.furnRoot.children, true).filter((h) => h.object.userData.pid != null && h.object.isMesh && !h.object.userData.halo);
     let drag = null, down = null;
     const driving = () => { this.userDriving = true; this.h.onInteract?.(this); };
     el.addEventListener('wheel', driving, { passive: true });
@@ -680,14 +782,17 @@ export class RoomView {
       if (!drag || e.pointerId !== drag.id) return;
       setNdc(e); const hit = floorHit(); if (!hit) return;
       const r = this.roomOf(drag.p);
-      drag.p.xIn = Math.round((hit.x + drag.dx - ft(r.originXIn)) * 12); drag.p.yIn = Math.round((hit.z + drag.dz - ft(r.originYIn)) * 12);
-      drag.moved = true; this.snapP(drag.p); this.clampP(drag.p); this.place(drag.p);
+      const xIn = (hit.x + drag.dx - ft(r.originXIn)) * 12, yIn = (hit.z + drag.dz - ft(r.originYIn)) * 12;
+      drag.moved = true;
+      if (mountOf(drag.p) === 'wall') this.snapToWall(drag.p, xIn, yIn);
+      else { drag.p.xIn = Math.round(xIn); drag.p.yIn = Math.round(yIn); this.snapP(drag.p); this.clampP(drag.p); }
+      this.place(drag.p);
       this.h.onSelect?.(this, drag.p);
     });
     const end = (e) => {
       if (drag) {
         const d = drag; drag = null; this.controls.enabled = true;
-        if (d.moved && (d.p.xIn !== d.before.xIn || d.p.yIn !== d.before.yIn)) this.h.onCommit?.(this, d.p, d.before);
+        if (d.moved && (d.p.xIn !== d.before.xIn || d.p.yIn !== d.before.yIn || d.p.rotationDeg !== d.before.rotationDeg)) this.h.onCommit?.(this, d.p, d.before);
         return;
       }
       if (down && e && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) { setNdc(e); if (!pick().length) this.select(null); }

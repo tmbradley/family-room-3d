@@ -59,7 +59,7 @@ export async function lockWorkspace(tx: Tx, workspaceId: number) {
 const mapId = (ctx: ApplyCtx, type: string, id: number) => ctx.idMap?.get(`${type}:${id}`) ?? id;
 
 /** What Current holds besides structure, and what an approved proposal may change there. */
-export const CURRENT_FURNISHING = ['placement', 'placement_param', 'room_style', 'furniture_item'] as const;
+export const CURRENT_FURNISHING = ['placement', 'placement_param', 'room_style', 'wall_style', 'furniture_item'] as const;
 
 /** Rooms of Current (not drafts). */
 async function currentRoomIds(tx: Tx) {
@@ -103,7 +103,8 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     if ('roomId' in data && data.roomId != null) {
       const room = await tx.room.findUnique({ where: { id: data.roomId } });
       if (!room) throw new ApiError(400, 'invalid_ref', `room ${data.roomId} not found`);
-      const linked = type === 'placement' || type === 'room_style'; // may sit in a Current room the workspace links
+      // Furniture, colors and a design's own fixtures may sit in a Current room the workspace links.
+      const linked = type === 'placement' || type === 'room_style' || (type === 'fixture' && W !== null);
       if (linked ? !(await rooms()).has(room.id) : room.draftWorkspaceId !== W)
         throw new ApiError(403, 'not_in_workspace', `room ${room.id} isn't ${linked ? 'in' : 'a room of'} ${scopeName}`);
     }
@@ -113,7 +114,12 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       throw new ApiError(400, 'invalid_ref', `placement ${data.replacesPlacementId} not found`);
     if ('wallId' in data && data.wallId != null) {
       const wall = await tx.wall.findUnique({ where: { id: data.wallId }, include: { room: true } });
-      if (!wall || wall.room.draftWorkspaceId !== W) throw new ApiError(403, 'not_in_workspace', `wall ${data.wallId} isn't in ${scopeName}`);
+      // Openings and walls change only in the scope's own rooms; a wall's color and a design's fixture
+      // may be on a wall of a Current room the design links.
+      const linked = type === 'wall_style' || (type === 'fixture' && W !== null);
+      if (!wall || (linked ? !(await rooms()).has(wall.roomId) : wall.room.draftWorkspaceId !== W))
+        throw new ApiError(403, 'not_in_workspace', `wall ${data.wallId} isn't in ${scopeName}`);
+      if (type === 'fixture' && data.roomId != null && wall.roomId !== data.roomId) throw new ApiError(400, 'invalid_ref', `wall ${data.wallId} isn't a wall of room ${data.roomId}`);
     }
     if (type === 'placement' && data.templateId != null && !(await tx.furnitureTemplate.findUnique({ where: { id: data.templateId } })))
       throw new ApiError(400, 'invalid_ref', `template ${data.templateId} not found (see list_templates)`);
@@ -163,8 +169,18 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
         if (await tx.roomStyle.findFirst({ where: { workspaceId: W, roomId: data.roomId } }))
           throw new ApiError(409, 'exists', `room ${data.roomId} already has colors in ${scopeName}; update that room_style instead`);
       }
+      if (op.entityType === 'wall_style') {
+        if (!allowSystem) data.workspaceId = W;
+        if (await tx.wallStyle.findFirst({ where: { workspaceId: data.workspaceId ?? W, wallId: data.wallId } }))
+          throw new ApiError(409, 'exists', `wall ${data.wallId} already has a color in ${scopeName}; update that wall_style instead`);
+      }
       if (currentRoom) data.draftWorkspaceId = null;
       await checkRefs(op.entityType, data);
+      // A design's fixture in a Current room belongs to the design (draft rooms own theirs).
+      if (op.entityType === 'fixture' && !allowSystem && W !== null) {
+        const rm = await tx.room.findUnique({ where: { id: data.roomId }, select: { draftWorkspaceId: true } });
+        data.workspaceId = rm?.draftWorkspaceId === W ? null : W;
+      }
       if (op.entityType === 'placement_param') {
         data.value = await checkTemplateParam(data.placementId, data.key, data.value);
         if (await tx.placementParam.findFirst({ where: { placementId: data.placementId, key: data.key } }))
