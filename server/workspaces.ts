@@ -15,18 +15,30 @@ async function measurementLookup(tx: Tx) {
 const roomInclude = (workspaceId: number | null) => ({
   walls: { include: { openings: { orderBy: { id: 'asc' as const } } }, orderBy: { id: 'asc' as const } },
   fixtures: { orderBy: { id: 'asc' as const } },
-  placements: { where: { workspaceId }, include: { item: true }, orderBy: { id: 'asc' as const } },
+  placements: {
+    where: { workspaceId },
+    include: { item: true, template: { select: { id: true, slug: true, name: true } }, params: { orderBy: { key: 'asc' as const } }, model: { include: { upload: { select: { format: true, bytes: true } } } } },
+    orderBy: { id: 'asc' as const },
+  },
+  roomStyles: { where: { workspaceId: workspaceId ?? -1 } },
 });
 
 export async function roomViews(tx: Tx, where: any, workspaceId: number | null) {
   const sources = await measurementLookup(tx);
   const rooms = await tx.room.findMany({ where, include: roomInclude(workspaceId), orderBy: { id: 'asc' } });
-  return rooms.map((r) => ({
+  return rooms.map((r) => {
+    // This workspace's colors for the room (room_styles) win over the room's own.
+    const st = r.roomStyles[0];
+    const pick = (name: string | null | undefined, color: string | null | undefined, n0: string | null, c0: string | null) =>
+      ({ name: name ?? (color ? null : n0), color: color ?? c0 });
+    return {
     id: r.id, slug: r.slug, label: r.label, draftWorkspaceId: r.draftWorkspaceId,
     originXIn: r.originXIn, originYIn: r.originYIn, rotationDeg: r.rotationDeg, ceilingIn: r.ceilingIn,
-    floor: { material: r.floorMaterial, finish: r.floorFinish, color: r.floorColor, keep: r.floorKeep },
-    wallColor: { name: r.wallColorName, color: r.wallColor },
-    trimColor: { name: r.trimColorName, color: r.trimColor },
+    floor: { material: r.floorMaterial, finish: r.floorFinish, color: st?.floorColor ?? r.floorColor, colorName: st?.floorColorName ?? null, keep: r.floorKeep },
+    wallColor: pick(st?.wallColorName, st?.wallColor, r.wallColorName, r.wallColor),
+    trimColor: pick(st?.trimColorName, st?.trimColor, r.trimColorName, r.trimColor),
+    deviceColor: { name: st?.deviceColorName ?? null, color: st?.deviceColor ?? null },
+    style: st ?? null,
     measurementStatus: r.measurementStatus,
     measurements: sources('room', r.id),
     walls: r.walls.map(({ openings, ...w }) => ({
@@ -34,11 +46,14 @@ export async function roomViews(tx: Tx, where: any, workspaceId: number | null) 
       openings: openings.map((o) => ({ ...o, measurements: sources('opening', o.id) })),
     })),
     fixtures: r.fixtures.map((f) => ({ ...f, measurements: sources('fixture', f.id) })),
-    furniture: r.placements.map(({ item, ...p }) => ({
+    furniture: r.placements.map(({ item, params, template, model, ...p }) => ({
       ...p, measurements: sources('placement', p.id),
       item: { ...item, measurements: sources('furniture_item', item.id) },
+      template: template ? { ...template, params: Object.fromEntries(params.map((x) => [x.key, x.value])), paramIds: Object.fromEntries(params.map((x) => [x.key, x.id])) } : null,
+      model: model ? { id: model.id, label: model.label, source: model.source, format: model.upload.format, bytes: model.upload.bytes, fileUrl: `/api/models/${model.id}/file` } : null,
     })),
-  }));
+  };
+  });
 }
 
 export async function listWorkspaces(tx: Tx) {
@@ -84,7 +99,7 @@ export async function getRoomView(tx: Tx, roomId: number, workspaceId?: number) 
 export async function copyWorkspace(tx: Tx, sourceId: number, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', sourceProposalId?: number) {
   const src = await tx.workspace.findUnique({
     where: { id: sourceId },
-    include: { rooms: true, styles: true, structureOverrides: true, placements: { orderBy: { id: 'asc' } } },
+    include: { rooms: true, styles: true, roomStyles: true, structureOverrides: true, placements: { orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } } } } },
   });
   if (!src) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceId} not found`);
   const ws = await tx.workspace.create({
@@ -127,14 +142,22 @@ export async function copyWorkspace(tx: Tx, sourceId: number, name: string, crea
   if (src.styles.length) await tx.workspaceRoomStyle.createMany({ data: src.styles.map(({ workspaceId, roomId, ...s }) => ({ ...s, workspaceId: ws.id, roomId: room(roomId) })) });
   if (src.structureOverrides.length)
     await tx.structureOverride.createMany({ data: src.structureOverrides.map(({ id, workspaceId, ...s }) => ({ ...s, workspaceId: ws.id })) });
+  if (src.roomStyles.length)
+    await tx.roomStyle.createMany({ data: src.roomStyles.map(({ id, workspaceId, roomId, ...s }) => ({ ...s, workspaceId: ws.id, roomId: room(roomId) })) });
   for (const p of src.placements) {
-    const { id, workspaceId, roomId, replacesPlacementId, ...pl } = p;
+    const { id, workspaceId, roomId, replacesPlacementId, params, ...pl } = p;
     const np = await tx.placement.create({
       data: { ...pl, workspaceId: ws.id, roomId: room(roomId), replacesPlacementId: replacesPlacementId != null ? idMap.get(`placement:${replacesPlacementId}`) ?? replacesPlacementId : null },
     });
     idMap.set(`placement:${id}`, np.id);
     await copyMeasurements('placement', id, np.id);
+    for (const prm of params) {
+      const np2 = await tx.placementParam.create({ data: { placementId: np.id, key: prm.key, value: prm.value } });
+      idMap.set(`placement_param:${prm.id}`, np2.id);
+    }
   }
+  for (const st of await tx.roomStyle.findMany({ where: { workspaceId: ws.id } }))
+    for (const old of src.roomStyles) if (room(old.roomId) === st.roomId) idMap.set(`room_style:${old.id}`, st.id);
   const changes: RevChange[] = [{ op: 'create', entityType: 'workspace', entityId: ws.id }];
   await commitRevision(tx, {
     workspaceId: ws.id, kind: 'copy', actor: createdBy, changes,
@@ -143,8 +166,12 @@ export async function copyWorkspace(tx: Tx, sourceId: number, name: string, crea
   return { workspace: await tx.workspace.findUniqueOrThrow({ where: { id: ws.id } }), idMap };
 }
 
-export async function createBlankWorkspace(tx: Tx, name: string) {
+/** A blank design on top of Current: links every Current room (no furniture yet). */
+export async function createBlankWorkspace(tx: Tx, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael') {
   const house = await tx.house.findFirst({ orderBy: { id: 'asc' } });
   if (!house) throw new ApiError(404, 'not_seeded', 'No house yet');
-  return tx.workspace.create({ data: { houseId: house.id, name, revision: 0, createdBy: 'michael', baseRevision: house.currentRevision } });
+  const ws = await tx.workspace.create({ data: { houseId: house.id, name, revision: 0, createdBy, baseRevision: house.currentRevision } });
+  const current = await tx.room.findMany({ where: { houseId: house.id, draftWorkspaceId: null }, select: { id: true } });
+  if (current.length) await tx.workspaceRoom.createMany({ data: current.map((r) => ({ workspaceId: ws.id, roomId: r.id })) });
+  return ws;
 }

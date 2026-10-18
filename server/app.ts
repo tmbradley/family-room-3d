@@ -13,8 +13,12 @@ import { approveProposal, createProposal, getProposal, listProposals, previewPro
 import { measurementHistory, recordMeasurement, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
-import { completeUpload, describeToken, generateUploadToken, importScan, presignUpload } from './uploads.js';
-import { getScanImport, listScanImports, promoteScanImport, rejectScanImport } from './scans.js';
+import { attachModel, completeUpload, describeToken, generateUploadToken, importModel, importScan, presignUpload, submitSuggestions, tokenRoomOutline, uploadModelFile } from './uploads.js';
+import { furnishFromScan, getScanImport, listScanImports, promoteScanImport, rejectScanImport } from './scans.js';
+import { listPhotos } from './photos.js';
+import { listTemplates } from './templates.js';
+import { getObject, signedGetUrl } from './storage.js';
+import { suggestionSchema } from './proposals.js';
 import { bodyLimit } from 'hono/body-limit';
 
 type Env = { Variables: { auth: AuthInfo } };
@@ -141,24 +145,66 @@ app.post('/api/current/rollback', read, michaelOnly, async (c) => {
   return c.json(await tx((t) => rollbackCurrent(t, h, b.toRevision, b.note)));
 });
 
-// Phone pairing (Michael's session creates the code; the App Clip uses only the code).
+// Phone pairing (Michael's session creates the code; the iPhone app uses only the code).
 app.post('/api/upload-tokens', read, michaelOnly, async (c) => {
-  const b = z.object({ roomId: z.number().int().optional(), newRoom: z.boolean().optional(), label: z.string().max(120).optional() }).parse(await c.req.json().catch(() => ({})));
+  const b = z.object({ roomId: z.number().int().optional(), newRoom: z.boolean().optional(), label: z.string().max(120).optional(), placementId: z.number().int().optional() }).parse(await c.req.json().catch(() => ({})));
   return c.json(await generateUploadToken(b), 201);
 });
 const tokenBody = z.object({ token: z.string().min(1).max(40) });
 app.post('/api/upload-tokens/validate', async (c) => c.json(await describeToken(tokenBody.parse(await c.req.json()).token)));
+app.post('/api/upload-tokens/room', async (c) => c.json(await tokenRoomOutline(tokenBody.parse(await c.req.json()).token)));
 app.post('/api/uploads/presigned', async (c) => {
-  const b = tokenBody.extend({ kind: z.enum(['scan', 'photo']), format: z.string().max(20) }).parse(await c.req.json());
+  const b = tokenBody.extend({ kind: z.enum(['scan', 'photo', 'model']), format: z.string().max(20) }).parse(await c.req.json());
   return c.json(await presignUpload(b.token, b.kind, b.format));
 });
 app.post('/api/uploads/:id/complete', async (c) => {
-  const b = tokenBody.extend({ bytes: z.number().int().min(0).max(2_000_000_000) }).parse(await c.req.json());
-  return c.json(await completeUpload(b.token, id(c.req.param('id')), b.bytes));
+  const b = tokenBody.extend({
+    bytes: z.number().int().min(0).max(2_000_000_000),
+    photo: z.object({ prompt: z.string().max(120).optional(), note: z.string().max(1000).optional(), roomTag: z.string().max(60).optional(), tags: z.array(z.string().max(40)).max(20).optional() }).optional(),
+  }).parse(await c.req.json());
+  return c.json(await completeUpload(b.token, id(c.req.param('id')), b.bytes, b.photo));
 });
 app.post('/api/scans/import', bodyLimit({ maxSize: 20 * 1024 * 1024, onError: () => { throw new ApiError(413, 'too_large', 'Scan JSON is larger than 20 MB'); } }), async (c) => {
-  const b = tokenBody.extend({ uploadId: z.number().int(), roomplanData: z.unknown(), roomId: z.number().int().nullable().optional() }).parse(await c.req.json());
+  const b = tokenBody.extend({ uploadId: z.number().int(), roomplanData: z.unknown(), roomId: z.number().int().nullable().optional(), objectLabels: z.record(z.string().max(100), z.string().max(200)).optional() }).parse(await c.req.json());
   return c.json(await importScan(b.token, b), 201);
+});
+app.post('/api/models/import', async (c) => {
+  const b = tokenBody.extend({ uploadId: z.number().int(), label: z.string().max(160).optional() }).parse(await c.req.json());
+  return c.json(await importModel(b.token, b), 201);
+});
+app.post('/api/suggestions', async (c) => {
+  const b = tokenBody.extend({ notes: z.string().min(1).max(4000), method: z.enum(['on_device_model', 'keywords', 'manual']), suggestions: z.array(suggestionSchema).min(1).max(30) }).parse(await c.req.json());
+  return c.json(await submitSuggestions(b.token, b), 201);
+});
+
+// Photos (signed URLs, valid a few minutes) and templates: any reader (session or agent key).
+app.get('/api/photos', read, async (c) => {
+  const roomId = c.req.query('roomId'), scanImportId = c.req.query('scanImportId');
+  return c.json(await listPhotos({ roomId: roomId ? id(roomId) : undefined, scanImportId: scanImportId ? id(scanImportId) : undefined }));
+});
+app.get('/api/templates', read, async (c) => c.json(await listTemplates(prisma)));
+
+// 3D models: the file is proxied (same origin, so the web viewer can load it without bucket CORS).
+app.get('/api/models/:id', read, async (c) => {
+  const m = await prisma.furnitureModel.findUnique({ where: { id: id(c.req.param('id')) }, include: { upload: true } });
+  if (!m) throw new ApiError(404, 'not_found', 'Model not found');
+  return c.json({ id: m.id, label: m.label, source: m.source, format: m.upload.format, bytes: m.upload.bytes, fileUrl: `/api/models/${m.id}/file`, downloadUrl: await signedGetUrl(m.upload.bucketKey, m.upload.format) });
+});
+app.get('/api/models/:id/file', read, async (c) => {
+  const m = await prisma.furnitureModel.findUnique({ where: { id: id(c.req.param('id')) }, include: { upload: true } });
+  if (!m) throw new ApiError(404, 'not_found', 'Model not found');
+  const obj = await getObject(m.upload.bucketKey);
+  const bytes = await obj.Body!.transformToByteArray();
+  return c.body(bytes as any, 200, { 'content-type': m.upload.format === 'glb' ? 'model/gltf-binary' : 'model/vnd.usdz+zip', 'cache-control': 'private, max-age=300' });
+});
+app.post('/api/models', read, michaelOnly, bodyLimit({ maxSize: 200 * 1024 * 1024, onError: () => { throw new ApiError(413, 'too_large', 'Models must be under 200 MB'); } }), async (c) => {
+  const q = z.object({ format: z.enum(['usdz', 'glb']), label: z.string().min(1).max(160), placementId: z.coerce.number().int().optional() }).parse(c.req.query());
+  const bytes = new Uint8Array(await c.req.arrayBuffer());
+  return c.json(await uploadModelFile({ bytes, ...q }), 201);
+});
+app.post('/api/placements/:id/model', read, michaelOnly, async (c) => {
+  const b = z.object({ modelId: z.number().int().nullable() }).parse(await c.req.json());
+  return c.json(await tx((t) => attachModel(t, id(c.req.param('id')), b.modelId, b.modelId == null ? 'Removed custom model' : `Attached model #${b.modelId}`)));
 });
 
 // Scan review (read for any signed-in reader; promote/reject only Michael).
@@ -168,6 +214,10 @@ app.get('/api/scans', read, async (c) => {
 });
 app.get('/api/scans/:id', read, async (c) => c.json(await getScanImport(id(c.req.param('id')))));
 app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => c.json(await promoteScanImport(id(c.req.param('id')), 'michael')));
+app.post('/api/scans/:id/furnish', read, michaelOnly, async (c) => {
+  const b = z.object({ name: z.string().min(1).max(120).optional() }).parse(await c.req.json().catch(() => ({})));
+  return c.json(await furnishFromScan(id(c.req.param('id')), b.name), 201);
+});
 app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
   const b = z.object({ notes: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));
   return c.json(await rejectScanImport(id(c.req.param('id')), b.notes));
@@ -176,31 +226,13 @@ app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
 // MCP
 app.all('/mcp', (c) => handleMcp(c.req.raw));
 
-// Apple App Site Association for App Clip (generated dynamically with APPLE_TEAM_ID)
+// Apple App Site Association: /scan?token=... links open the House Planner app (universal links).
 const getAppleAppSiteAssociation = () => {
   const teamId = process.env.APPLE_TEAM_ID;
-  if (!teamId) {
-    return { error: 'APPLE_TEAM_ID environment variable not set' };
-  }
-  
+  if (!teamId) return { error: 'APPLE_TEAM_ID environment variable not set' };
   return {
-    appclips: {
-      apps: [`${teamId}.com.michaelbradley.houseplanner.clip`],
-    },
     applinks: {
-      details: [
-        {
-          appIDs: [`${teamId}.com.michaelbradley.houseplanner.clip`],
-          components: [
-            {
-              '/': '/scan',
-              '?': {
-                token: '?*',
-              },
-            },
-          ],
-        },
-      ],
+      details: [{ appIDs: [`${teamId}.com.michaelbradley.houseplanner`], components: [{ '/': '/scan', '?': { token: '?*' }, comment: 'Pairing link from the editor' }] }],
     },
   };
 };
@@ -219,7 +251,7 @@ app.get('/apple-app-site-association', (c) => {
 // Pages
 app.get('/login', serveStatic({ path: './server/public/login.html' }));
 app.get('/login.js', serveStatic({ path: './server/public/login.js' }));
-// App Clip invocation URL (https://<host>/scan?token=...). Public: shows the code, never anything else.
+// Pairing link (https://<host>/scan?token=...): opens the iPhone app; this page is the fallback. Shows only the code.
 app.get('/scan', serveStatic({ path: './server/public/scan.html' }));
 app.get('/scan.js', serveStatic({ path: './server/public/scan.js' }));
 for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js']) {

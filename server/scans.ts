@@ -22,6 +22,9 @@ import { prisma } from './db.js';
 import { ApiError } from './util.js';
 import { applyOps, commitRevision, isPinned, lockHouse, type Op } from './changes.js';
 import type { Tx } from './entities.js';
+import { listPhotos } from './photos.js';
+import { matchTemplate, templateBySlug } from './templates.js';
+import { createBlankWorkspace } from './workspaces.js';
 
 // ---------------------------------------------------------------------------
 // Input validation (only the parts we use; everything else is passed through and ignored)
@@ -54,7 +57,7 @@ const categoryOf = (c: unknown) => (typeof c === 'string' ? c : c && typeof c ==
 
 export type ParsedWall = { key: string; startXIn: number; startYIn: number; endXIn: number; endYIn: number; heightIn: number; lengthIn: number };
 export type ParsedOpening = { key: string; wallKey: string; type: 'window' | 'door' | 'open_span'; offsetIn: number; widthIn: number; sillIn: number; headIn: number };
-export type ParsedObject = { key: string; kind: string; xIn: number; yIn: number; rotationDeg: number; widthIn: number; depthIn: number; heightIn: number };
+export type ParsedObject = { key: string; kind: string; xIn: number; yIn: number; rotationDeg: number; widthIn: number; depthIn: number; heightIn: number; label?: string };
 export type ParsedScan = {
   widthIn: number; depthIn: number; ceilingIn: number;
   /** How far the scan was rotated (degrees) so its walls line up with the plan axes. */
@@ -177,18 +180,27 @@ function fromRows(rows: Row[]) {
       widthIn: n(room.widthIn), depthIn: n(room.depthIn), ceilingIn: n(room.ceilingIn), alignedByDeg: n(room.alignedByDeg),
       walls: list('wall').map((w) => ({ key: w.key, startXIn: n(w.startXIn), startYIn: n(w.startYIn), endXIn: n(w.endXIn), endYIn: n(w.endYIn), heightIn: n(w.heightIn), lengthIn: n(w.lengthIn) })),
       openings: list('opening').map((o) => ({ key: o.key, wallKey: o.wallKey, type: o.type as ParsedOpening['type'], offsetIn: n(o.offsetIn), widthIn: n(o.widthIn), sillIn: n(o.sillIn), headIn: n(o.headIn) })),
-      objects: list('object').map((o) => ({ key: o.key, kind: o.kind, xIn: n(o.xIn), yIn: n(o.yIn), rotationDeg: n(o.rotationDeg), widthIn: n(o.widthIn), depthIn: n(o.depthIn), heightIn: n(o.heightIn) })),
+      objects: list('object').map((o) => ({ key: o.key, kind: o.kind, xIn: n(o.xIn), yIn: n(o.yIn), rotationDeg: n(o.rotationDeg), widthIn: n(o.widthIn), depthIn: n(o.depthIn), heightIn: n(o.heightIn), ...(o.label ? { label: o.label } : {}) })),
     } as ParsedScan,
   };
 }
 
-export async function createScanImport(p: { houseId: number; uploadId: number; roomplanData: unknown; label: string; roomId: number | null }) {
+/** Short labels from the phone (on-device model), keyed by RoomPlan object identifier. */
+const cleanLabel = (s: unknown) => String(s ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80);
+
+export async function createScanImport(p: { houseId: number; uploadId: number; roomplanData: unknown; label: string; roomId: number | null; tokenId?: number; objectLabels?: Record<string, string> }) {
   const parsed = parseCapturedRoom(p.roomplanData);
+  for (const o of parsed.objects) { const l = cleanLabel(p.objectLabels?.[o.key]); if (l) o.label = l; }
   return prisma.$transaction(async (tx) => {
     if (await tx.scanImport.findUnique({ where: { uploadId: p.uploadId } })) throw new ApiError(409, 'already_imported', 'This upload was already imported');
     const si = await tx.scanImport.create({ data: { houseId: p.houseId, roomId: p.roomId, uploadId: p.uploadId, label: p.label.slice(0, 120), status: 'pending' } });
     await tx.scanImportData.createMany({ data: toRows(parsed, p.label).map((r) => ({ ...r, value: r.value.slice(0, 1000), scanImportId: si.id })) });
     await tx.upload.update({ where: { id: p.uploadId }, data: { status: 'imported', scanImportId: si.id } });
+    // Everything else uploaded with this code belongs to the scan too (USDZ, photos).
+    if (p.tokenId != null) {
+      await tx.upload.updateMany({ where: { tokenId: p.tokenId, id: { not: p.uploadId }, scanImportId: null, status: 'uploaded' }, data: { scanImportId: si.id } });
+      await tx.scanPhoto.updateMany({ where: { upload: { is: { tokenId: p.tokenId } }, scanImportId: null }, data: { scanImportId: si.id, roomId: p.roomId } });
+    }
     return { id: si.id, status: si.status, label: si.label, walls: parsed.walls.length, openings: parsed.openings.length, objects: parsed.objects.length };
   });
 }
@@ -222,7 +234,12 @@ export async function getScanImport(id: number) {
   if (!si) throw new ApiError(404, 'not_found', 'Scan import not found');
   const { label, scan } = fromRows(si.data);
   const { data: _rows, ...rest } = si;
-  return { ...rest, parsed: scan, preview: { id: `scan:${si.id}`, name: `Scan #${si.id}: ${label}`, revision: null, units: 'in', rooms: [previewRoom(label, scan)] } };
+  const objects = scan.objects.map((o) => ({ ...o, template: matchTemplate(o.kind, o.widthIn, o.depthIn, o.heightIn) }));
+  const photos = await listPhotos({ scanImportId: si.id });
+  return {
+    ...rest, parsed: { ...scan, objects }, photos, canFurnish: await canFurnish(si.id),
+    preview: { id: `scan:${si.id}`, name: `Scan #${si.id}: ${label}`, revision: null, units: 'in', rooms: [previewRoom(label, scan)] },
+  };
 }
 
 export async function listScanImports(houseId: number, status?: 'pending' | 'promoted' | 'rejected') {
@@ -443,10 +460,55 @@ export async function promoteIn(tx: Tx, id: number, actor: 'michael') {
   });
   const roomId = room?.id ?? refs.room;
   await tx.scanImport.update({ where: { id }, data: { status: 'promoted', promotedAt: new Date(), promotedBy: actor, roomId } });
+  await tx.scanPhoto.updateMany({ where: { scanImportId: id }, data: { roomId } });
   return { scanImportId: id, roomId, roomCreated: created, revision: rev.number, changeRows: changes.length, measurementsRecorded: scanned.length, kept };
 }
 
 async function anyPin(tx: Tx, entityType: string, entityId: number, fields: readonly string[]) {
   for (const f of fields) if (await isPinned(tx, entityType, entityId, f)) return true;
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Furniture from a scan: RoomPlan objects -> closest templates, as placements in a new workspace.
+// ---------------------------------------------------------------------------
+/** Only for a promoted scan that created its room, so object positions are in the room's frame. */
+async function canFurnish(id: number) {
+  const si = await prisma.scanImport.findUnique({ where: { id }, include: { upload: { include: { token: true } } } });
+  return !!si && si.status === 'promoted' && si.roomId != null && !!si.upload.token?.newRoom;
+}
+
+/** RoomPlan yaw (local x toward +plan y) -> editor rotation (three.js rotation.y), squared to 90°. */
+export const editorRotation = (yawDeg: number) => (((Math.round(-yawDeg / 90) * 90) % 360) + 360) % 360;
+
+export async function furnishFromScan(id: number, name?: string) {
+  if (!(await canFurnish(id))) throw new ApiError(409, 'cannot_furnish', 'Only a promoted scan that created its room can be furnished (rescans are in a different frame)');
+  return prisma.$transaction(async (tx) => {
+    const si = await tx.scanImport.findUniqueOrThrow({ where: { id }, include: { data: true } });
+    const { scan } = fromRows(si.data);
+    const ws = await createBlankWorkspace(tx, (name || `${si.label ?? 'Room'} furniture (scan #${id})`).slice(0, 120));
+    const templates = new Map((await tx.furnitureTemplate.findMany()).map((t) => [t.slug, t]));
+    const ops: Op[] = [];
+    let n = 0;
+    const skipped: string[] = [];
+    for (const o of scan.objects) {
+      const m = matchTemplate(o.kind, o.widthIn, o.depthIn, o.heightIn);
+      const t = m && templates.get(m.slug);
+      if (!m || !t) { skipped.push(`${o.kind} ${o.widthIn}x${o.depthIn}x${o.heightIn}`); continue; }
+      const def = templateBySlug.get(m.slug)!;
+      const i = n++;
+      ops.push({ op: 'create', entityType: 'furniture_item', tempRef: `i${i}`, fields: {
+        kind: t.kind, name: (o.label || `${t.name} (scanned)`).slice(0, 160), wIn: Math.max(1, o.widthIn), dIn: Math.max(1, o.depthIn), hIn: Math.max(0, o.heightIn),
+        color: def.params.find((p) => p.type === 'color')?.default as string ?? null, status: 'existing', notes: `From scan #${id} (RoomPlan "${o.kind}")`,
+      } });
+      ops.push({ op: 'create', entityType: 'placement', tempRef: `p${i}`, fields: {
+        roomId: si.roomId!, itemId: `$i${i}`, xIn: o.xIn, yIn: o.yIn, rotationDeg: editorRotation(o.rotationDeg), action: 'existing', templateId: t.id,
+      } });
+      for (const [key, value] of Object.entries(m.params)) ops.push({ op: 'create', entityType: 'placement_param', fields: { placementId: `$p${i}`, key, value } });
+    }
+    if (!ops.length) throw new ApiError(409, 'nothing_to_furnish', 'The scan has no objects that match a template');
+    const { changes } = await applyOps(tx, ops, { workspaceId: ws.id, mode: 'save' });
+    const rev = await commitRevision(tx, { workspaceId: ws.id, kind: 'save', actor: 'michael', changes, note: `Furniture from scan #${id}: ${n} piece(s) matched to templates${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}` });
+    return { workspaceId: ws.id, revision: rev.number, placements: n, skipped };
+  }, { timeout: 60_000 });
 }

@@ -10,18 +10,20 @@ export type Tx = Prisma.TransactionClient;
 
 export type FieldSpec =
   | { type: 'int'; nullable?: boolean; min?: number; max?: number; ref?: EntityType; system?: boolean }
-  | { type: 'str'; nullable?: boolean; max: number; system?: boolean }
+  | { type: 'str'; nullable?: boolean; max: number; system?: boolean; hex?: boolean }
   | { type: 'bool'; system?: boolean }
   | { type: 'enum'; values: readonly string[]; nullable?: boolean; system?: boolean };
 
-export type EntityType = 'placement' | 'furniture_item' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
+export type EntityType = 'placement' | 'placement_param' | 'room_style' | 'furniture_item' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
 
 const SRC = ['manual_estimate', 'measured', 'scan', 'manual'] as const;
 const color = { type: 'str', nullable: true, max: 9 } as const;
+/** #rrggbb, stored lowercase (room colors). */
+const hexColor = { type: 'str', nullable: true, max: 7, hex: true } as const;
 const inches = (min = -100000, max = 100000) => ({ type: 'int', min, max }) as const;
 
 type Def = {
-  model: 'placement' | 'furnitureItem' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
+  model: 'placement' | 'placementParam' | 'roomStyle' | 'furnitureItem' | 'room' | 'wall' | 'opening' | 'fixture' | 'workspace';
   label: string;
   fields: Record<string, FieldSpec>;
   required: string[]; // for create
@@ -44,6 +46,30 @@ export const ENTITIES: Record<EntityType, Def> = {
       replacesPlacementId: { type: 'int', nullable: true, ref: 'placement' },
       notes: { type: 'str', nullable: true, max: 500 },
       measurementStatus: { type: 'enum', values: SRC, system: true },
+      templateId: { type: 'int', nullable: true, min: 1 },
+      modelId: { type: 'int', nullable: true, min: 1 },
+    },
+  },
+  placement_param: {
+    // Template parameter values (keys and values are checked against the placement's template).
+    model: 'placementParam', label: 'Template parameter of a placement', create: true, delete: true, pinnable: [],
+    required: ['placementId', 'key', 'value'],
+    fields: {
+      placementId: { type: 'int', ref: 'placement' },
+      key: { type: 'str', max: 40 }, value: { type: 'str', max: 120 },
+    },
+  },
+  room_style: {
+    // Colors of a room in this workspace. Works for Current rooms the workspace links, too.
+    model: 'roomStyle', label: 'Room colors in this workspace (walls, trim, floor, outlets/switches)', create: true, delete: true, pinnable: [],
+    required: ['roomId'],
+    fields: {
+      workspaceId: { type: 'int', system: true },
+      roomId: { type: 'int', ref: 'room' },
+      wallColorName: { type: 'str', nullable: true, max: 60 }, wallColor: hexColor,
+      trimColorName: { type: 'str', nullable: true, max: 60 }, trimColor: hexColor,
+      floorColorName: { type: 'str', nullable: true, max: 60 }, floorColor: hexColor,
+      deviceColorName: { type: 'str', nullable: true, max: 60 }, deviceColor: hexColor,
     },
   },
   furniture_item: {
@@ -156,6 +182,7 @@ export function coerce(entityType: string, field: string, v: unknown, allowSyste
     case 'str': {
       const s = String(v);
       if (s.length > f.max) throw new ApiError(400, 'invalid_value', `${where} is longer than ${f.max} characters`);
+      if (f.hex) { if (!/^#[0-9a-f]{6}$/i.test(s)) throw new ApiError(400, 'invalid_value', `${where} must be a #rrggbb color`); return s.toLowerCase(); }
       return s;
     }
     case 'bool':
@@ -178,6 +205,11 @@ export const delegate = (tx: Tx, entityType: string) => (tx as any)[def(entityTy
 export async function ownerOf(tx: Tx, entityType: string, row: any): Promise<number | 'global' | null> {
   switch (entityType) {
     case 'placement': return row.workspaceId;
+    case 'room_style': return row.workspaceId;
+    case 'placement_param': {
+      const p = await tx.placement.findUnique({ where: { id: row.placementId }, select: { workspaceId: true } });
+      return p?.workspaceId ?? null;
+    }
     case 'furniture_item': return 'global';
     case 'workspace': return row.id;
     case 'room': return row.draftWorkspaceId;

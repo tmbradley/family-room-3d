@@ -10,8 +10,10 @@
 import { prisma } from './db.js';
 import { seedHouse } from './seed.js';
 import { runExport } from './export.js';
+import { syncTemplates } from './templates.js';
 
 export async function bootstrap() {
+  await prisma.$transaction((tx) => syncTemplates(tx), { timeout: 60_000 });
   const seed = process.env.SEED_HOUSE_JSON_B64;
   if (seed && (await prisma.house.count()) === 0) {
     const src = JSON.parse(Buffer.from(seed, 'base64').toString('utf8'));

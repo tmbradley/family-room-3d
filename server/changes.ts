@@ -5,6 +5,7 @@
  */
 import type { Actor, RevisionKind } from '@prisma/client';
 import { ApiError } from './util.js';
+import { checkParam } from './templates.js';
 import { coerce, def, delegate, fieldSpec, ownerOf, ser, workspaceRoomIds, type Tx } from './entities.js';
 
 export type Op =
@@ -88,8 +89,9 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     if ('roomId' in data && data.roomId != null) {
       const room = await tx.room.findUnique({ where: { id: data.roomId } });
       if (!room) throw new ApiError(400, 'invalid_ref', `room ${data.roomId} not found`);
-      if (type === 'placement' ? !(await rooms()).has(room.id) : room.draftWorkspaceId !== W)
-        throw new ApiError(403, 'not_in_workspace', `room ${room.id} isn't ${type === 'placement' ? 'in' : 'a room of'} ${scopeName}`);
+      const linked = type === 'placement' || type === 'room_style'; // may sit in a Current room the workspace links
+      if (linked ? !(await rooms()).has(room.id) : room.draftWorkspaceId !== W)
+        throw new ApiError(403, 'not_in_workspace', `room ${room.id} isn't ${linked ? 'in' : 'a room of'} ${scopeName}`);
     }
     if (type === 'placement' && data.itemId != null && !(await tx.furnitureItem.findUnique({ where: { id: data.itemId } })))
       throw new ApiError(400, 'invalid_ref', `furniture_item ${data.itemId} not found`);
@@ -99,6 +101,22 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       const wall = await tx.wall.findUnique({ where: { id: data.wallId }, include: { room: true } });
       if (!wall || wall.room.draftWorkspaceId !== W) throw new ApiError(403, 'not_in_workspace', `wall ${data.wallId} isn't in ${scopeName}`);
     }
+    if (type === 'placement' && data.templateId != null && !(await tx.furnitureTemplate.findUnique({ where: { id: data.templateId } })))
+      throw new ApiError(400, 'invalid_ref', `template ${data.templateId} not found (see list_templates)`);
+    if (type === 'placement' && data.modelId != null && !(await tx.furnitureModel.findUnique({ where: { id: data.modelId } })))
+      throw new ApiError(400, 'invalid_ref', `model ${data.modelId} not found`);
+    if (type === 'placement_param' && data.placementId != null) {
+      const pl = await tx.placement.findUnique({ where: { id: data.placementId } });
+      if (!pl || pl.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', `placement ${data.placementId} isn't in ${scopeName}`);
+    }
+  };
+
+  /** Template parameter values must fit the placement's template (not checked when restoring history). */
+  const checkTemplateParam = async (placementId: number, key: string, value: unknown) => {
+    if (ctx.mode === 'rollback') return String(value);
+    const pl = await tx.placement.findUnique({ where: { id: placementId }, include: { template: true } });
+    if (!pl?.template) throw new ApiError(400, 'no_template', `placement ${placementId} has no template; set placement.templateId first`);
+    return checkParam(pl.template.slug, key, value);
   };
 
   const snapshot = (type: string, row: any) => {
@@ -111,7 +129,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     const d = def(op.entityType);
     const model = delegate(tx, op.entityType);
 
-    if ((op.entityType === 'placement' || op.entityType === 'workspace') && W === null)
+    if (['placement', 'placement_param', 'room_style', 'workspace'].includes(op.entityType) && W === null)
       throw new ApiError(403, 'current_locked', 'Current holds structure only; furniture lives in workspaces');
 
     if (op.op === 'create') {
@@ -125,8 +143,18 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
         if (missing.length) throw new ApiError(400, 'missing_fields', `${op.entityType} create needs ${missing.join(', ')}`);
       }
       if (op.entityType === 'placement' && !allowSystem) data.workspaceId = W;
+      if (op.entityType === 'room_style') {
+        data.workspaceId = W;
+        if (await tx.roomStyle.findFirst({ where: { workspaceId: W!, roomId: data.roomId } }))
+          throw new ApiError(409, 'exists', `room ${data.roomId} already has colors in ${scopeName}; update that room_style instead`);
+      }
       if (currentRoom) data.draftWorkspaceId = null;
       await checkRefs(op.entityType, data);
+      if (op.entityType === 'placement_param') {
+        data.value = await checkTemplateParam(data.placementId, data.key, data.value);
+        if (await tx.placementParam.findFirst({ where: { placementId: data.placementId, key: data.key } }))
+          throw new ApiError(409, 'exists', `placement ${data.placementId} already has ${data.key}; update it instead`);
+      }
       if (op.entityType === 'placement' && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
       if (op.id != null) data.id = op.id;
       const row = await model.create({ data });
@@ -152,9 +180,16 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       if (ctx.checkBefore && op.before !== undefined && ser(row[op.field]) !== op.before)
         throw new ApiError(409, 'stale', `${op.entityType} ${id} ${op.field} changed since this was proposed (was ${op.before}, now ${ser(row[op.field])})`);
       if (ser(row[op.field]) === ser(val)) continue;
-      if (op.field in { roomId: 1, wallId: 1, itemId: 1, replacesPlacementId: 1 }) await checkRefs(op.entityType, { ...row, [op.field]: val });
-      await model.update({ where: { id }, data: { [op.field]: val } });
-      changes.push({ op: 'update', entityType: op.entityType, entityId: id, field: op.field, beforeValue: ser(row[op.field]), afterValue: ser(val) });
+      if (op.entityType === 'room_style' && op.field === 'roomId') throw new ApiError(400, 'unknown_field', 'room_style.roomId can\'t change; create a new room_style');
+      if (op.entityType === 'placement_param' && (op.field === 'placementId' || op.field === 'key')) throw new ApiError(400, 'unknown_field', `placement_param.${op.field} can't change; delete and create instead`);
+      if (op.field in { roomId: 1, wallId: 1, itemId: 1, replacesPlacementId: 1, templateId: 1, modelId: 1 }) await checkRefs(op.entityType, { ...row, [op.field]: val });
+      let stored = val;
+      if (op.entityType === 'placement_param' && op.field === 'value') {
+        stored = await checkTemplateParam(row.placementId, row.key, val);
+        if (ser(row.value) === ser(stored)) continue;
+      }
+      await model.update({ where: { id }, data: { [op.field]: stored } });
+      changes.push({ op: 'update', entityType: op.entityType, entityId: id, field: op.field, beforeValue: ser(row[op.field]), afterValue: ser(stored) });
       continue;
     }
 
@@ -175,6 +210,15 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     }
     if (op.entityType === 'placement' && (await tx.placement.count({ where: { replacesPlacementId: id } })))
       throw new ApiError(409, 'has_children', `placement ${id} is replaced by another placement; change that one first`);
+    if (op.entityType === 'placement') {
+      // Its template parameters go with it, recorded first so a rollback restores them too.
+      for (const prow of await tx.placementParam.findMany({ where: { placementId: id }, orderBy: { id: 'asc' } })) {
+        await tx.placementParam.delete({ where: { id: prow.id } });
+        changes.push({ op: 'delete', entityType: 'placement_param', entityId: prow.id });
+        for (const [k, v] of Object.entries(snapshot('placement_param', prow)))
+          if (v !== null && v !== undefined) changes.push({ op: 'delete', entityType: 'placement_param', entityId: prow.id, field: k, beforeValue: ser(v) });
+      }
+    }
     await model.delete({ where: { id } });
     changes.push({ op: 'delete', entityType: op.entityType, entityId: id });
     for (const [k, v] of Object.entries(snapshot(op.entityType, row)))
