@@ -241,7 +241,7 @@ export async function getScanImport(id: number) {
   const objects = scan.objects.map((o) => ({ ...o, template: matchTemplate(o.kind, o.widthIn, o.depthIn, o.heightIn) }));
   const photos = await listPhotos({ scanImportId: si.id });
   return {
-    ...rest, parsed: { ...scan, objects }, photos, canFurnish: await canFurnish(si.id),
+    ...rest, parsed: { ...scan, objects }, photos, canFurnish: await canFurnish(si.id), designId: (await designFromScan(prisma, si.id))?.id ?? null,
     preview: { id: `scan:${si.id}`, name: `Scan #${si.id}: ${label}`, revision: null, units: 'in', rooms: [previewRoom(label, scan)] },
   };
 }
@@ -249,9 +249,9 @@ export async function getScanImport(id: number) {
 export async function listScanImports(houseId: number, status?: 'pending' | 'promoted' | 'rejected') {
   const rows = await prisma.scanImport.findMany({
     where: { houseId, ...(status ? { status } : {}) }, orderBy: { createdAt: 'desc' }, take: 50,
-    include: { room: { select: { id: true, label: true } }, _count: { select: { data: true, files: true } } },
+    include: { room: { select: { id: true, label: true } }, _count: { select: { data: true, files: true } }, designs: { where: { archivedAt: null }, select: { id: true }, orderBy: { id: 'asc' }, take: 1 } },
   });
-  return rows.map((r) => ({ id: r.id, status: r.status, label: r.label, room: r.room, createdAt: r.createdAt, promotedAt: r.promotedAt, files: r._count.files }));
+  return rows.map((r) => ({ id: r.id, status: r.status, label: r.label, room: r.room, createdAt: r.createdAt, promotedAt: r.promotedAt, files: r._count.files, designId: r.designs[0]?.id ?? null }));
 }
 
 export async function rejectScanImport(id: number, notes?: string) {
@@ -529,14 +529,23 @@ export async function fixMirroredRoom(roomId: number) {
   }, { timeout: 60_000 });
 }
 
+/** The live design already started from this scan, if any (furnishing is done once per scan). */
+export async function designFromScan(tx: Tx, scanId: number) {
+  return tx.workspace.findFirst({ where: { sourceScanId: scanId, archivedAt: null }, orderBy: { id: 'asc' } });
+}
+
 export async function furnishFromScan(id: number, name?: string) {
+  const made = await designFromScan(prisma, id);
+  if (made) return { workspaceId: made.id, revision: made.revision, existing: true, name: made.name, placements: await prisma.placement.count({ where: { workspaceId: made.id } }), skipped: [], mergedSectionals: 0 };
   const check = await furnishCheck(id);
   if (!check.ok) throw new ApiError(409, check.code, check.message);
   return prisma.$transaction(async (tx) => {
     const si = await tx.scanImport.findUniqueOrThrow({ where: { id }, include: { data: true } });
     const { scan } = fromRows(si.data);
     if (si.planFrame === 1) scan.objects = unmirrorObjects(scan);
-    const ws = await createBlankWorkspace(tx, (name || `${si.label ?? 'Room'} furniture (scan #${id})`).slice(0, 120));
+    // A name Michael typed must be free in the room; the automatic one gets " 2", " 3" if needed.
+    const day = si.createdAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+    const ws = await createBlankWorkspace(tx, (name || `${si.label ?? 'Room'} · From scan ${day}`).slice(0, 120), 'michael', 'none', { naming: name ? 'refuse' : 'suffix', sourceScanId: id });
     const templates = new Map((await tx.furnitureTemplate.findMany()).map((t) => [t.slug, t]));
     const ops: Op[] = [];
     let n = 0;
@@ -577,6 +586,6 @@ export async function furnishFromScan(id: number, name?: string) {
     if (!ops.length) throw new ApiError(409, 'nothing_to_furnish', 'The scan has no objects that match a template');
     const { changes } = await applyOps(tx, ops, { workspaceId: ws.id, mode: 'save' });
     const rev = await commitRevision(tx, { workspaceId: ws.id, kind: 'save', actor: 'michael', changes, note: `Furniture from scan #${id}: ${n} piece(s) matched to templates${merged.length && lt ? ` (${merged.length} L-sectional(s) merged from separate sofa boxes)` : ''}${skipped.length ? `; skipped ${skipped.join(', ')}` : ''}` });
-    return { workspaceId: ws.id, revision: rev.number, placements: n, skipped, mergedSectionals: lt ? merged.length : 0 };
+    return { workspaceId: ws.id, revision: rev.number, existing: false, name: ws.name, placements: n, skipped, mergedSectionals: lt ? merged.length : 0 };
   }, { timeout: 60_000 });
 }

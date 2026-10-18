@@ -9,7 +9,8 @@ import { runExport } from './export.js';
 import { ApiError } from './util.js';
 import { getHistory, revertRevision, rollbackCurrent, rollbackWorkspace, saveChanges, type Op } from './changes.js';
 import { copyWorkspace, createBlankWorkspace, getRoomView, getWorkspaceView, listWorkspaces } from './workspaces.js';
-import { approveProposal, createProposal, getProposal, listProposals, previewProposal, proposeAsCurrent, rejectProposal } from './proposals.js';
+import { approveProposal, createProposal, getProposal, listProposals, previewProposal, proposeAsCurrent, rejectProposal, saveToCurrent, saveToCurrentSummary, undoApproval } from './proposals.js';
+import { currentRoomKeys, nameClash, roomKeysOf, setArchived, uniqueName } from './designs.js';
 import { measurementHistory, recordMeasurement, setWithdrawn, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
@@ -77,7 +78,26 @@ app.post('/api/export/run', requireAuth('admin'), async (c) => c.json(await runE
 
 // Workspaces
 app.get('/api/workspaces', read, async (c) => c.json(await listWorkspaces(prisma)));
+// Is a design name free? Room = Current's rooms, or the rooms of the design being copied. Suggests a free one.
+app.get('/api/workspaces/name-check', read, async (c) => {
+  const name = (c.req.query('name') ?? '').trim();
+  const from = c.req.query('copyFrom');
+  const except = c.req.query('except');
+  const r = await tx(async (t) => {
+    const h = await houseId();
+    const { keys } = from ? await roomKeysOf(t, id(from)) : except ? await roomKeysOf(t, id(except)) : await currentRoomKeys(t, h);
+    const taken = name ? await nameClash(t, h, name, keys, except ? id(except) : undefined) : null;
+    return { name, free: !!name && !taken, takenBy: taken?.id ?? null, suggestion: await uniqueName(t, h, name || 'Design', keys, except ? id(except) : undefined) };
+  });
+  return c.json(r);
+});
 app.get('/api/workspaces/:id', read, async (c) => c.json(await getWorkspaceView(prisma, id(c.req.param('id')))));
+// Archive / restore a design (hidden and read-only while archived; nothing is deleted).
+app.post('/api/workspaces/:id/archive', read, michaelOnly, async (c) => {
+  const b = z.object({ archived: z.boolean().default(true) }).parse(await c.req.json().catch(() => ({})));
+  const wsId = id(c.req.param('id'));
+  return c.json(await tx((t) => setArchived(t, wsId, b.archived)));
+});
 app.post('/api/workspaces', read, michaelOnly, async (c) => {
   const b = z.object({
     name: z.string().min(1).max(120), copyFromWorkspaceId: z.number().int().optional(),
@@ -106,6 +126,12 @@ app.post('/api/workspaces/:id/revert', read, michaelOnly, async (c) => {
 });
 // "Make this Current's furniture": files a pending proposal for Current; nothing changes until Michael approves it.
 app.post('/api/workspaces/:id/propose-as-current', read, michaelOnly, async (c) => c.json(await proposeAsCurrent(id(c.req.param('id'))), 201));
+// Save to Current: the summary (GET) is what Michael confirms; the POST files the proposal and approves it at once.
+app.get('/api/workspaces/:id/save-to-current', read, async (c) => c.json(await saveToCurrentSummary(id(c.req.param('id')))));
+app.post('/api/workspaces/:id/save-to-current', read, michaelOnly, async (c) => {
+  const b = z.object({ revision: z.number().int().min(0) }).parse(await c.req.json());
+  return c.json(await saveToCurrent(id(c.req.param('id')), b.revision), 201);
+});
 app.get('/api/rooms/:id', read, async (c) => {
   const ws = c.req.query('workspaceId');
   return c.json(await getRoomView(prisma, id(c.req.param('id')), ws ? id(ws) : undefined));
@@ -126,6 +152,7 @@ app.post('/api/proposals', requireAuth('propose'), async (c) => {
 });
 const noteBody = async (c: any) => z.object({ note: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));
 app.post('/api/proposals/:id/approve', read, michaelOnly, async (c) => c.json(await approveProposal(id(c.req.param('id')), (await noteBody(c)).note)));
+app.post('/api/proposals/:id/undo-approve', read, michaelOnly, async (c) => c.json(await undoApproval(id(c.req.param('id')))));
 app.post('/api/proposals/:id/reject', read, michaelOnly, async (c) => c.json(await rejectProposal(id(c.req.param('id')), (await noteBody(c)).note)));
 
 // Measurements: enter a measured value, pin (source = manual), unpin.
@@ -233,7 +260,8 @@ app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => c.json(await 
 app.post('/api/rooms/:id/fix-mirror', read, michaelOnly, async (c) => c.json(await fixMirroredRoom(id(c.req.param('id')))));
 app.post('/api/scans/:id/furnish', read, michaelOnly, async (c) => {
   const b = z.object({ name: z.string().min(1).max(120).optional() }).parse(await c.req.json().catch(() => ({})));
-  return c.json(await furnishFromScan(id(c.req.param('id')), b.name), 201);
+  const r = await furnishFromScan(id(c.req.param('id')), b.name);
+  return c.json(r, r.existing ? 200 : 201); // 200 = the design this scan already made
 });
 app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
   const b = z.object({ notes: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));

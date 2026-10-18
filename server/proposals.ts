@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { Actor, Prisma } from '@prisma/client';
 import { ApiError } from './util.js';
 import { coerce, def, delegate, fieldSpec, ser, type Tx } from './entities.js';
-import { applyOps, commitRevision, lockHouse, lockWorkspace, type Op } from './changes.js';
+import { applyOps, commitRevision, lockHouse, lockWorkspace, rollbackCurrent, rollbackWorkspace, type Op } from './changes.js';
 import { copyWorkspace, getCurrentView, getWorkspaceView } from './workspaces.js';
 import { prisma } from './db.js';
 import { listPhotos } from './photos.js';
@@ -99,7 +99,7 @@ async function applyProposal(tx: Tx, p: { id: number; houseId: number; targetCur
     workspaceId = (await lockWorkspace(tx, p.targetWorkspaceId)).id;
   } else {
     if (p.baseWorkspaceId == null) throw new ApiError(409, 'no_base', 'The workspace this proposal copies from no longer exists');
-    const copy = await copyWorkspace(tx, p.baseWorkspaceId, p.newWorkspaceName || 'New design', p.createdBy, forReal ? p.id : undefined);
+    const copy = await copyWorkspace(tx, p.baseWorkspaceId, p.newWorkspaceName || 'New design', p.createdBy, forReal ? p.id : undefined, 'suffix');
     workspaceId = copy.workspace.id;
     idMap = copy.idMap;
   }
@@ -124,6 +124,7 @@ export async function createProposal(input: ProposalInput, by: { actor: Actor; a
     const sourceWsId = p.workspaceId ?? p.newWorkspace!.copyFromWorkspaceId;
     const sourceWs = await prisma.workspace.findUnique({ where: { id: sourceWsId } });
     if (!sourceWs) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceWsId} not found`);
+    if (p.workspaceId != null && sourceWs.archivedAt) throw new ApiError(409, 'archived', `"${sourceWs.name}" is archived. Restore it before proposing changes to it.`);
     houseId = sourceWs.houseId; baseRevision = sourceWs.revision; view = await getWorkspaceView(prisma, sourceWsId); scopeName = `workspace ${sourceWsId}`;
   }
   const roomIds = new Set(view.rooms.map((r) => r.id));
@@ -342,6 +343,41 @@ export async function approveProposal(id: number, note?: string) {
   }, { timeout: 30_000 });
 }
 
+/**
+ * Undo an approval right after it (the editor's "Approved · Undo" toast): rolls the target back to
+ * just before the approval revision and puts the proposal back to pending. A proposal that made a
+ * new design archives that design instead (nothing is deleted). Only while nothing else has changed
+ * the target since; otherwise roll back from History. Measurement proposals are rolled back from History.
+ */
+export async function undoApproval(id: number) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM proposals WHERE id = ${id} FOR UPDATE`;
+    const p = await tx.proposal.findUnique({ where: { id } });
+    if (!p) throw new ApiError(404, 'proposal_not_found', `Proposal ${id} not found`);
+    if (p.status !== 'approved') throw new ApiError(409, 'not_approved', `Proposal ${id} is ${p.status}`);
+    if (p.kind === 'measurements') throw new ApiError(409, 'not_undoable', 'Measurement proposals are rolled back from History');
+    if (!p.decidedAt || Date.now() - p.decidedAt.getTime() > 10 * 60_000) throw new ApiError(409, 'too_late', 'Undo is only offered right after approving. Roll back from History instead.');
+    const rev = await tx.revision.findFirst({ where: { proposalId: id, kind: 'proposal' }, orderBy: { id: 'desc' } });
+    if (!rev) throw new ApiError(409, 'not_undoable', 'No revision found for this approval');
+    const latest = await tx.revision.findFirst({ where: { houseId: rev.houseId, scope: rev.scope }, orderBy: { number: 'desc' } });
+    if (latest?.id !== rev.id) throw new ApiError(409, 'stale', 'Something changed after the approval. Roll back from History instead.');
+    const made = rev.workspaceId != null ? await tx.workspace.findFirst({ where: { id: rev.workspaceId, sourceProposalId: id } }) : null;
+    let result: { rolledBackTo?: number; archivedWorkspaceId?: number };
+    if (made) {
+      await tx.workspace.update({ where: { id: made.id }, data: { archivedAt: new Date(), sourceProposalId: null } });
+      result = { archivedWorkspaceId: made.id };
+    } else if (rev.workspaceId == null) {
+      await rollbackCurrent(tx, rev.houseId, rev.number - 1, `Undid approval of #${id}`);
+      result = { rolledBackTo: rev.number - 1 };
+    } else {
+      await rollbackWorkspace(tx, rev.workspaceId, rev.number - 1, `Undid approval of #${id}`);
+      result = { rolledBackTo: rev.number - 1 };
+    }
+    await tx.proposal.update({ where: { id }, data: { status: 'pending', decidedAt: null, decisionNote: null, ...(made ? { targetWorkspaceId: null } : {}) } });
+    return { proposalId: id, status: 'pending' as const, workspaceId: rev.workspaceId, ...result };
+  }, { timeout: 30_000 });
+}
+
 export async function rejectProposal(id: number, note?: string) {
   const p = await prisma.proposal.findUnique({ where: { id } });
   if (!p) throw new ApiError(404, 'proposal_not_found', `Proposal ${id} not found`);
@@ -367,7 +403,7 @@ const STYLE_FIELDS = ['wallColorName', 'wallColor', 'trimColorName', 'trimColor'
  * marked new, replace or remove are design ideas and are left out. Current's old pieces in those
  * rooms are removed. The workspace itself is not changed.
  */
-export async function proposeAsCurrent(workspaceId: number) {
+async function currentPlan(workspaceId: number) {
   const ws = await prisma.workspace.findUnique({ where: { id: workspaceId } });
   if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
   const links = await prisma.workspaceRoom.findMany({ where: { workspaceId }, include: { room: { select: { id: true, label: true, draftWorkspaceId: true } } } });
@@ -376,15 +412,19 @@ export async function proposeAsCurrent(workspaceId: number) {
   const roomIds = rooms.map((r) => r.id);
   const [pls, oldPls, styles, oldStyles] = await Promise.all([
     prisma.placement.findMany({ where: { workspaceId, roomId: { in: roomIds } }, orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } }, item: { select: { name: true } } } }),
-    prisma.placement.findMany({ where: { workspaceId: null, roomId: { in: roomIds } }, orderBy: { id: 'asc' } }),
+    prisma.placement.findMany({ where: { workspaceId: null, roomId: { in: roomIds } }, orderBy: { id: 'asc' }, include: { params: true } }),
     prisma.roomStyle.findMany({ where: { workspaceId, roomId: { in: roomIds } } }),
     prisma.roomStyle.findMany({ where: { workspaceId: null, roomId: { in: roomIds } } }),
   ]);
   const keep = pls.filter((p) => p.action === 'existing' || p.action === 'keep');
   const skipped = pls.filter((p) => !keep.includes(p));
   const changes: any[] = [];
-  for (const p of oldPls) changes.push({ op: 'delete', entityType: 'placement', entityId: p.id });
-  keep.forEach((p, i) => {
+  // Already the same pieces in Current (same item, spot, turn, template, parameters, model)? Then leave them.
+  const sig = (p: { roomId: number; itemId: number; xIn: number; yIn: number; rotationDeg: number; templateId: number | null; modelId: number | null; notes?: string | null; params?: { key: string; value: string }[] }) =>
+    JSON.stringify([p.roomId, p.itemId, p.xIn, p.yIn, p.rotationDeg, p.templateId, p.modelId, p.notes ?? null, (p.params ?? []).map((x) => [x.key, x.value]).sort()]);
+  const same = keep.length === oldPls.length && JSON.stringify(keep.map(sig).sort()) === JSON.stringify(oldPls.map(sig).sort());
+  if (!same) for (const p of oldPls) changes.push({ op: 'delete', entityType: 'placement', entityId: p.id });
+  if (!same) keep.forEach((p, i) => {
     const fields: Record<string, any> = { roomId: p.roomId, itemId: p.itemId, xIn: p.xIn, yIn: p.yIn, rotationDeg: p.rotationDeg, action: 'existing' };
     if (p.notes) fields.notes = p.notes;
     if (p.templateId != null) fields.templateId = p.templateId;
@@ -400,6 +440,55 @@ export async function proposeAsCurrent(workspaceId: number) {
       if (Object.keys(fields).length > 1) changes.push({ op: 'create', entityType: 'room_style', tempRef: `s${st.roomId}`, fields });
     } else for (const f of STYLE_FIELDS) if (st[f] !== old[f]) changes.push({ op: 'update', entityType: 'room_style', entityId: old.id, field: f, value: st[f] });
   }
+  return { ws, rooms, roomIds, keep, skipped, oldPls, styles, oldStyles, changes };
+}
+
+/**
+ * What "Save to Current" would do, for the editor's summary dialog: the pieces that go into Current,
+ * the ideas that are left out, the rooms whose colors change, and pending proposals on the design.
+ */
+export async function saveToCurrentSummary(workspaceId: number) {
+  const { ws, rooms, keep, skipped, oldPls, styles, oldStyles, changes } = await currentPlan(workspaceId);
+  const items = await prisma.furnitureItem.findMany({ where: { id: { in: [...keep, ...skipped].map((p) => p.itemId) } }, select: { id: true, name: true } });
+  const nm = (id: number) => items.find((i) => i.id === id)?.name ?? `item ${id}`;
+  const pending = await prisma.proposal.findMany({ where: { status: 'pending', targetWorkspaceId: workspaceId }, select: { id: true, title: true }, orderBy: { id: 'asc' } });
+  const house = await prisma.house.findFirst({ orderBy: { id: 'asc' } });
+  const colorRooms = styles.filter((st) => {
+    const old = oldStyles.find((o) => o.roomId === st.roomId);
+    return STYLE_FIELDS.some((f) => st[f] != null && (!old || st[f] !== old[f]));
+  }).map((st) => ({ roomId: st.roomId, label: rooms.find((r) => r.id === st.roomId)?.label ?? `room ${st.roomId}`, wallColor: st.wallColor, wallColorName: st.wallColorName, trimColor: st.trimColor, floorColor: st.floorColor }));
+  return {
+    workspaceId: ws.id, name: ws.name, revision: ws.revision, currentRevision: house?.currentRevision ?? 0,
+    rooms: rooms.map((r) => ({ id: r.id, label: r.label })),
+    goesIn: keep.map((p) => ({ placementId: p.id, name: nm(p.itemId), action: p.action, roomId: p.roomId })),
+    leftOut: skipped.map((p) => ({ placementId: p.id, name: nm(p.itemId), action: p.action, roomId: p.roomId })),
+    replacesCurrentPieces: oldPls.length, colors: colorRooms, pending,
+    nothingToChange: changes.length === 0, changeCount: changes.length,
+  };
+}
+
+/**
+ * Save to Current in one step (Michael only): the summary dialog is his approval, so this files the
+ * proposal and approves it at once. It is a normal Current revision, rolled back from History.
+ * `revision` is the design revision the summary showed; a newer edit makes this a 409 stale.
+ */
+export async function saveToCurrent(workspaceId: number, revision: number) {
+  const ws = await prisma.workspace.findUnique({ where: { id: workspaceId } });
+  if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
+  if (ws.revision !== revision) throw new ApiError(409, 'stale', `"${ws.name}" changed since the summary (revision ${revision}, now ${ws.revision}). Look again.`);
+  const filed = await proposeAsCurrent(workspaceId);
+  try {
+    const r = await approveProposal(filed.id, 'Saved to Current from the editor');
+    return { proposalId: filed.id, currentRevision: r.revision };
+  } catch (e) {
+    // Don't leave a half-done save waiting in the Inbox.
+    await rejectProposal(filed.id, `Save to Current did not go through: ${(e as Error).message}`.slice(0, 900)).catch(() => {});
+    throw e;
+  }
+}
+
+export async function proposeAsCurrent(workspaceId: number) {
+  const { ws, rooms, roomIds, keep, skipped, oldPls, styles, changes } = await currentPlan(workspaceId);
   if (!changes.length) throw new ApiError(409, 'nothing_to_change', "Current already has this workspace's furniture and colors");
   if (changes.length > 200) throw new ApiError(400, 'too_many_changes', `That is ${changes.length} changes; a proposal holds 200. Split the rooms into separate workspaces.`);
   const names = rooms.map((r) => r.label).join(', ');

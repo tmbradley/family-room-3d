@@ -1,6 +1,10 @@
 import { ApiError, effective } from './util.js';
 import { commitRevision, type RevChange } from './changes.js';
 import type { Tx } from './entities.js';
+import { assertNameFree, currentRoomKeys, roomKeysOf, uniqueName } from './designs.js';
+
+/** 'refuse' = 409 if the name is taken in the room (Michael typed it); 'suffix' = add " 2", " 3" (agents, automatic names). */
+export type Naming = 'refuse' | 'suffix';
 
 async function measurementLookup(tx: Tx) {
   const all = await tx.measurement.findMany();
@@ -62,12 +66,34 @@ export async function listWorkspaces(tx: Tx) {
     include: { _count: { select: { draftRooms: true, rooms: true, placements: true } } },
   });
   const pending = await tx.proposal.groupBy({ by: ['targetWorkspaceId'], where: { status: 'pending' }, _count: true });
-  return ws.map((w) => ({
-    id: w.id, name: w.name, notes: w.notes, revision: w.revision, baseRevision: w.baseRevision,
-    basedOnCurrent: w.baseRevision != null, createdBy: w.createdBy, createdAt: w.createdAt,
-    rooms: w._count.rooms, placements: w._count.placements,
-    pendingProposals: pending.find((p) => p.targetWorkspaceId === w.id)?._count ?? 0,
-  }));
+  const latest = await tx.revision.groupBy({ by: ['workspaceId'], where: { workspaceId: { not: null } }, _max: { createdAt: true } });
+  const firsts = await tx.revision.findMany({ where: { workspaceId: { not: null }, number: 1 }, select: { workspaceId: true, note: true, kind: true } });
+  const out = [];
+  for (const w of ws) {
+    const { keys, labels } = await roomKeysOf(tx, w.id);
+    const rooms = await tx.workspaceRoom.findMany({ where: { workspaceId: w.id }, select: { roomId: true }, orderBy: { roomId: 'asc' } });
+    const first = firsts.find((r) => r.workspaceId === w.id);
+    const copied = first?.kind === 'copy' ? /^Copied from "(.*)" \(workspace (\d+)\)/.exec(first.note ?? '') : null;
+    const fromCurrent = first?.kind === 'copy' ? /^Started from Current \(revision (\d+)\)/.exec(first.note ?? '') : null;
+    // Where the design came from, for the sidebar's sub-line.
+    const origin = w.sourceScanId != null ? { kind: 'scan' as const, scanId: w.sourceScanId }
+      : copied ? { kind: 'copy' as const, name: copied[1], workspaceId: Number(copied[2]) }
+      : w.sourceProposalId != null ? { kind: 'proposal' as const, proposalId: w.sourceProposalId }
+      : fromCurrent ? { kind: 'current' as const, revision: Number(fromCurrent[1]) }
+      : w.baseRevision != null ? { kind: 'current' as const, revision: w.baseRevision }
+      : { kind: 'blank' as const };
+    out.push({
+      id: w.id, name: w.name, notes: w.notes, revision: w.revision, baseRevision: w.baseRevision,
+      basedOnCurrent: w.baseRevision != null, createdBy: w.createdBy, createdAt: w.createdAt,
+      updatedAt: latest.find((l) => l.workspaceId === w.id)?._max.createdAt ?? w.createdAt,
+      archivedAt: w.archivedAt, archived: w.archivedAt != null,
+      sourceScanId: w.sourceScanId, sourceProposalId: w.sourceProposalId, origin,
+      rooms: w._count.rooms, placements: w._count.placements,
+      roomIds: rooms.map((r) => r.roomId), roomKeys: keys, roomLabels: labels,
+      pendingProposals: pending.find((p) => p.targetWorkspaceId === w.id)?._count ?? 0,
+    });
+  }
+  return out;
 }
 
 export async function getWorkspaceView(tx: Tx, workspaceId: number) {
@@ -77,7 +103,8 @@ export async function getWorkspaceView(tx: Tx, workspaceId: number) {
   const rooms = await roomViews(tx, { OR: [{ draftWorkspaceId: w.id }, { id: { in: roomIds } }] }, w.id);
   return {
     id: w.id, name: w.name, notes: w.notes, revision: w.revision, baseRevision: w.baseRevision,
-    basedOnCurrent: w.baseRevision != null, editable: true, units: 'in', rooms,
+    basedOnCurrent: w.baseRevision != null, editable: w.archivedAt == null, archived: w.archivedAt != null, archivedAt: w.archivedAt,
+    sourceScanId: w.sourceScanId, units: 'in', rooms,
   };
 }
 
@@ -104,12 +131,15 @@ export async function getRoomView(tx: Tx, roomId: number, workspaceId?: number) 
  * rooms, color styles, structure overrides and placements. Returns the new workspace and an id map
  * ("type:oldId" -> newId) so proposal changes against the source can be re-targeted.
  */
-export async function copyWorkspace(tx: Tx, sourceId: number, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', sourceProposalId?: number) {
+export async function copyWorkspace(tx: Tx, sourceId: number, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', sourceProposalId?: number, naming: Naming = 'refuse') {
   const src = await tx.workspace.findUnique({
     where: { id: sourceId },
     include: { rooms: true, styles: true, roomStyles: true, structureOverrides: true, placements: { orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } } } } },
   });
   if (!src) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceId} not found`);
+  // The copy covers the same rooms, so its name must be free in those rooms.
+  const { keys, labels } = await roomKeysOf(tx, sourceId);
+  name = naming === 'suffix' ? await uniqueName(tx, src.houseId, name, keys) : await assertNameFree(tx, src.houseId, name, keys, labels);
   const ws = await tx.workspace.create({
     data: { houseId: src.houseId, name, notes: src.notes, baseRevision: src.baseRevision, revision: 0, createdBy, sourceProposalId },
   });
@@ -179,10 +209,15 @@ export async function copyWorkspace(tx: Tx, sourceId: number, name: string, crea
  * new designs) it starts from the house as it is now: Current's furniture placements (with template
  * parameters and 3D models) and room colors are copied in, so the design can change them freely.
  */
-export async function createBlankWorkspace(tx: Tx, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', furnishings: 'current' | 'none' = 'none') {
+export async function createBlankWorkspace(
+  tx: Tx, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', furnishings: 'current' | 'none' = 'none',
+  opts: { naming?: Naming; sourceScanId?: number } = {},
+) {
   const house = await tx.house.findFirst({ orderBy: { id: 'asc' } });
   if (!house) throw new ApiError(404, 'not_seeded', 'No house yet');
-  const ws = await tx.workspace.create({ data: { houseId: house.id, name, revision: 0, createdBy, baseRevision: house.currentRevision } });
+  const { keys, labels } = await currentRoomKeys(tx, house.id);
+  name = opts.naming === 'suffix' ? await uniqueName(tx, house.id, name, keys) : await assertNameFree(tx, house.id, name, keys, labels);
+  const ws = await tx.workspace.create({ data: { houseId: house.id, name, revision: 0, createdBy, baseRevision: house.currentRevision, sourceScanId: opts.sourceScanId ?? null } });
   const current = await tx.room.findMany({ where: { houseId: house.id, draftWorkspaceId: null }, select: { id: true } });
   if (current.length) await tx.workspaceRoom.createMany({ data: current.map((r) => ({ workspaceId: ws.id, roomId: r.id })) });
   if (furnishings === 'current') {

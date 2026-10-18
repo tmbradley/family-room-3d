@@ -20,6 +20,12 @@ export const api = {
   createWorkspace: (name, copyFromWorkspaceId, furnishings) => req('POST', '/api/workspaces', { name, copyFromWorkspaceId, furnishings }),
   revert: (id, baseRevision, revision, note) => req('POST', `/api/workspaces/${id}/revert`, { baseRevision, revision, note }),
   proposeAsCurrent: (id) => req('POST', `/api/workspaces/${id}/propose-as-current`),
+  saveToCurrentSummary: (id) => req('GET', `/api/workspaces/${id}/save-to-current`),
+  saveToCurrent: (id, revision) => req('POST', `/api/workspaces/${id}/save-to-current`, { revision }),
+  archive: (id, archived = true) => req('POST', `/api/workspaces/${id}/archive`, { archived }),
+  nameCheck: (q) => req('GET', `/api/workspaces/name-check?${new URLSearchParams(q)}`), // { name, copyFrom?, except? }
+  undoApprove: (id) => req('POST', `/api/proposals/${id}/undo-approve`),
+  logout: () => req('POST', '/auth/logout'),
   withdrawMeasurement: (id, body) => req('POST', `/api/measurements/${id}/withdraw`, body),
   save: (id, baseRevision, changes, note) => req('POST', `/api/workspaces/${id}/changes`, { baseRevision, changes, note }),
   history: (id) => req('GET', `/api/workspaces/${id}/history?limit=100`),

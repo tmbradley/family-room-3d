@@ -345,6 +345,9 @@ export const footprintFt = (p) => {
 };
 
 // ---------------------------------------------------------------------------
+/** Comparison colors: added green, changed amber, removed red. */
+export const MARK_COLORS = { added: '#1e9e5a', changed: '#f0b400', removed: '#a3341f' };
+
 export class RoomView {
   constructor(container, handlers = {}) {
     this.el = container;
@@ -391,13 +394,19 @@ export class RoomView {
       if (this.selHelper) this.selHelper.update();
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.scene, this.camera);
+      this.h.onFrame?.(this);
     });
   }
 
   // ---- data -----------------------------------------------------------------
-  setData(ws, { editable = false, highlight = [] } = {}) {
+  /**
+   * highlight: entity keys ("placement:12", "furniture_item:3") drawn as changed (green box, legacy).
+   * marks: { "placement:12": 'added' | 'changed' | 'removed' } drawn green / amber / red. Pieces with
+   * `_removed: true` (shown from the other side of a comparison) are drawn as red ghosts.
+   */
+  setData(ws, { editable = false, highlight = [], marks = null } = {}) {
     const first = !this.data;
-    this.data = ws; this.editable = editable; this.highlight = new Set(highlight);
+    this.data = ws; this.editable = editable; this.highlight = new Set(highlight); this.marks = marks ?? {};
     this.buildRooms();
     this.buildFurniture();
     if (first || this.boundsKey !== this.lastFitKey) { this.fit(); this.lastFitKey = this.boundsKey; }
@@ -564,14 +573,16 @@ export class RoomView {
     for (const r of this.data?.rooms ?? []) for (const p of r.furniture) {
       const it = p.item, g = new THREE.Group();
       if (!buildTemplate(g, p, it)) (BUILDERS[it.kind] || BUILDERS.box)(g, ft(it.wIn), ft(it.dIn), ft(it.hIn), it);
-      const ghost = p.action === 'remove';
+      const mark = p._removed ? 'removed' : this.marks?.[`placement:${p.id}`] ?? this.marks?.[`furniture_item:${it.id}`]
+        ?? (this.highlight.has(`placement:${p.id}`) || this.highlight.has(`furniture_item:${it.id}`) ? 'added' : null);
+      const ghost = p.action === 'remove' || mark === 'removed';
       g.traverse((o) => {
         o.userData.pid = p.id;
         if (ghost && o.isMesh) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.25; o.castShadow = false; }
       });
       const div = document.createElement('div');
-      div.className = 'lbl' + (this.highlight.has(`placement:${p.id}`) ? ' changed' : '') + (ghost ? ' ghost' : '');
-      div.textContent = it.name + (ghost ? ' (remove)' : '');
+      div.className = 'lbl' + (mark ? ` changed mark-${mark}` : '') + (ghost ? ' ghost' : '');
+      div.textContent = it.name + (mark === 'removed' ? ' (removed)' : ghost ? ' (remove)' : '');
       if (p.model) {
         // The model wins over the template. Until it loads (or if it can't), the template stands in with a badge.
         const badge = document.createElement('span'); badge.className = 'badge-model'; badge.textContent = 'custom model'; div.appendChild(badge);
@@ -588,8 +599,8 @@ export class RoomView {
       const lbl = new CSS2DObject(div);
       lbl.position.set(0, Math.max(ft(it.hIn), 0.3) + 0.35 + (it.kind === 'tv' ? 2 : 0), it.kind === 'rug' ? ft(it.dIn) / 2 - 1 : 0);
       g.add(lbl); g.userData.labelEl = div;
-      if (this.highlight.has(`placement:${p.id}`) || this.highlight.has(`furniture_item:${it.id}`)) {
-        const hl = new THREE.BoxHelper(g, '#1e9e5a'); g.userData.hl = hl;
+      if (mark) {
+        const hl = new THREE.BoxHelper(g, MARK_COLORS[mark] ?? MARK_COLORS.added); g.userData.hl = hl;
       }
       this.objects.set(p.id, g); this.furnRoot.add(g); this.place(p);
       if (g.userData.hl) { g.updateMatrixWorld(true); g.userData.hl.update(); this.furnRoot.add(g.userData.hl); }
@@ -611,6 +622,16 @@ export class RoomView {
     const g = id != null && this.objects.get(id);
     if (g) { this.selHelper = new THREE.BoxHelper(g, '#ffb400'); this.scene.add(this.selHelper); g.userData.labelEl.classList.add('sel'); }
     this.h.onSelect?.(this, this.selected != null ? this.placement(this.selected) : null);
+  }
+  /** Where a piece is on screen (px, relative to the view): the top-center of its bounding box. */
+  screenOf(id) {
+    const g = id != null && this.objects.get(id); if (!g) return null;
+    const box = new THREE.Box3().setFromObject(g);
+    if (box.isEmpty()) return null;
+    const v = new THREE.Vector3((box.min.x + box.max.x) / 2, box.max.y, (box.min.z + box.max.z) / 2).project(this.camera);
+    const r = this.el.getBoundingClientRect();
+    if (v.z > 1) return null; // behind the camera
+    return { x: ((v.x + 1) / 2) * r.width, y: ((1 - v.y) / 2) * r.height, w: r.width, h: r.height };
   }
   snapP(p) {
     if (!this.snap) return;
