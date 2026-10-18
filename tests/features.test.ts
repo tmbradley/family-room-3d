@@ -34,7 +34,7 @@ const { seedHouse } = await import('../server/seed.js');
 const { app } = await import('../server/app.js');
 const { sha256 } = await import('../server/util.js');
 const { syncTemplates, checkParam, matchTemplate, TEMPLATES } = await import('../server/templates.js');
-const { editorRotation } = await import('../server/scans.js');
+const { editorRotation, parseCapturedRoom, unmirrorObjects } = await import('../server/scans.js');
 // @ts-ignore plain JS module
 const { buildCapturedRoom, SAMPLE } = await import('../fixtures/roomplan-builder.mjs');
 
@@ -114,8 +114,8 @@ test('templates: library synced idempotently, params validated, scanned objects 
   assert.equal(matchTemplate('bed', 60, 80, 24)!.slug, 'bed');
   assert.equal(matchTemplate('storage', 70, 18, 22)!.slug, 'media_console');
   assert.equal(matchTemplate('toilet', 20, 28, 30), null);
-  // RoomPlan yaw (local x toward +plan y) to three.js rotation.y, squared.
-  assert.equal(editorRotation(0), 0); assert.equal(editorRotation(90), 270); assert.equal(editorRotation(268), 90); assert.equal(editorRotation(181), 180);
+  // Plan yaw (counterclockwise from +x, seen from above) is three.js rotation.y; squared to 90°.
+  assert.equal(editorRotation(0), 0); assert.equal(editorRotation(90), 90); assert.equal(editorRotation(268), 270); assert.equal(editorRotation(181), 180); assert.equal(editorRotation(359), 0);
 });
 
 let scanId = 0, curRoom = 0, photoIds: number[] = [], scanToken = '';
@@ -344,6 +344,47 @@ test('MCP: new read tools for read keys; propose tools create pending proposals 
   // Read keys can't propose.
   const ro = await app.request('/api/proposals', { method: 'POST', headers: { authorization: `Bearer ${READ_KEY}`, 'content-type': 'application/json' }, body: '{}' });
   assert.equal(ro.status, 403);
+});
+
+test('mirror fix: older (frame 1) scans convert exactly; Michael-only, rollback-able; rescans wait for it', async () => {
+  // Frame-1 parse of a room == frame-2 parse of its mirror image (z -> -z). unmirrorObjects undoes it.
+  const room = buildCapturedRoom({ ...SAMPLE, yawDeg: 17, objects: [{ cat: 'sofa', x: 30, z: 20, w: 84, h: 34, d: 36 }, { cat: 'table', x: 100, z: 120, w: 48, h: 18, d: 24 }] });
+  const mirror = JSON.parse(JSON.stringify(room));
+  for (const list of ['walls', 'doors', 'windows', 'openings', 'objects', 'floors']) for (const o of mirror[list]) for (const i of [2, 6, 8, 9, 14]) o.transform[i] = -o.transform[i];
+  const v2 = parseCapturedRoom(room), legacy = parseCapturedRoom(mirror);
+  assert.notDeepEqual(legacy.objects.map((o) => o.yIn), v2.objects.map((o) => o.yIn));
+  const fixed = unmirrorObjects(legacy);
+  for (const [i, o] of v2.objects.entries()) {
+    assert.ok(Math.abs(fixed[i].xIn - o.xIn) <= 1 && Math.abs(fixed[i].yIn - o.yIn) <= 1, JSON.stringify([fixed[i], o]));
+    assert.equal(editorRotation(fixed[i].rotationDeg), editorRotation(o.rotationDeg));
+  }
+  // A Current room marked as built from a frame-1 scan.
+  const legacyRoom = await prisma.room.findUniqueOrThrow({ where: { id: curRoom }, include: { walls: { orderBy: { id: 'asc' } } } });
+  await prisma.room.update({ where: { id: curRoom }, data: { planFrame: 1 } });
+  const re = await pair({ roomId: curRoom });
+  const j = await upload(re, 'scan', 'roomplan_json', new TextEncoder().encode('{}'));
+  const s2 = ok(await http('POST', '/api/scans/import', { token: re, uploadId: j, roomplanData: buildCapturedRoom(SAMPLE) }, 'none'), 201);
+  assert.equal((await http('POST', `/api/scans/${s2.id}/promote`)).json.error, 'mirrored_room');
+  assert.equal((await http('POST', `/api/scans/${scanId}/furnish`, {})).json.error, 'mirrored_room');
+  assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`, {}, 'agent')).status, 403);
+  assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`)).json.error, 'has_furniture'); // the furnished workspace
+  const placed = await prisma.placement.findMany({ where: { roomId: curRoom } });
+  await prisma.placementParam.deleteMany({ where: { placementId: { in: placed.map((p) => p.id) } } });
+  await prisma.placement.deleteMany({ where: { roomId: curRoom } });
+  assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`)).json.error, 'pending_scans');
+  ok(await http('POST', `/api/scans/${s2.id}/reject`, {}));
+  const fx = ok(await http('POST', `/api/rooms/${curRoom}/fix-mirror`));
+  assert.ok(fx.changeRows > 1);
+  const after = await prisma.room.findUniqueOrThrow({ where: { id: curRoom }, include: { walls: { orderBy: { id: 'asc' } } } });
+  const maxY = Math.max(...legacyRoom.walls.flatMap((w) => [w.startYIn, w.endYIn]));
+  assert.equal(after.planFrame, 2);
+  for (const [i, w] of after.walls.entries()) { assert.equal(w.startYIn, maxY - legacyRoom.walls[i].startYIn); assert.equal(w.endXIn, legacyRoom.walls[i].endXIn); }
+  assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`)).json.error, 'not_mirrored');
+  // Rollback puts it back exactly (frame marker included).
+  ok(await http('POST', '/api/current/rollback', { toRevision: fx.revision - 1 }));
+  const back = await prisma.room.findUniqueOrThrow({ where: { id: curRoom }, include: { walls: { orderBy: { id: 'asc' } } } });
+  assert.equal(back.planFrame, 1);
+  assert.deepEqual(back.walls.map((w) => [w.startYIn, w.endYIn]), legacyRoom.walls.map((w) => [w.startYIn, w.endYIn]));
 });
 
 test('AASA: /scan opens the full app via universal links; no App Clip entry', async () => {

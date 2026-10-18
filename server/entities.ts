@@ -97,6 +97,7 @@ export const ENTITIES: Record<EntityType, Def> = {
       floorMaterial: { type: 'str', nullable: true, max: 80, system: true }, floorFinish: { type: 'str', nullable: true, max: 80, system: true },
       floorKeep: { type: 'bool', system: true },
       measurementStatus: { type: 'enum', values: SRC, system: true },
+      planFrame: { type: 'int', nullable: true, min: 1, max: 2, system: true },
       label: { type: 'str', max: 120 }, ceilingIn: inches(1, 600),
       originXIn: inches(), originYIn: inches(), rotationDeg: { type: 'int', min: 0, max: 359 },
       floorColor: color, wallColorName: { type: 'str', nullable: true, max: 60 }, wallColor: color,

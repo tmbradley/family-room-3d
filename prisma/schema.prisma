@@ -186,6 +186,8 @@ model Room {
   originYIn         Int               @default(0) @map("origin_y_in")
   rotationDeg       Int               @default(0) @map("rotation_deg")
   ceilingIn         Int               @map("ceiling_in")
+  /// For rooms made from a scan: the scan's plan frame (1 = mirror image, fix with /api/rooms/:id/fix-mirror).
+  planFrame         Int?              @map("plan_frame")
   floorMaterial     String?           @map("floor_material") @db.VarChar(80)
   floorFinish       String?           @map("floor_finish") @db.VarChar(80)
   floorColor        String?           @map("floor_color") @db.VarChar(9)
@@ -850,6 +852,8 @@ model ScanImport {
   status     ScanImportStatus @default(pending)
   label      String?          @db.VarChar(120)
   notes      String?          @db.Text
+  /// 1 = parsed before the mirror fix (plan y = world Z, a mirror image); 2 = plan y = -world Z.
+  planFrame  Int              @default(1) @map("plan_frame")
   promotedAt DateTime?        @map("promoted_at")
   promotedBy Actor?           @map("promoted_by")
   createdAt  DateTime         @default(now()) @map("created_at")

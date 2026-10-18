@@ -24,7 +24,7 @@ test('sample fixture is in RoomPlan layout and parses to a squared 12x13 room', 
   assert.equal(r.widthIn, 144);
   assert.equal(r.depthIn, 156);
   assert.equal(r.ceilingIn, 108);
-  assert.equal(r.alignedByDeg, 30);
+  assert.equal(r.alignedByDeg, -30); // the session was turned 30° counterclockwise seen from above (about +Y)
   assert.deepEqual(r.walls.map((w) => [w.startXIn, w.startYIn, w.endXIn, w.endYIn, w.heightIn]), [
     [0, 0, 144, 0, 108], [144, 0, 144, 156, 108], [144, 156, 0, 156, 108], [0, 156, 0, 0, 108],
   ]);
@@ -87,4 +87,27 @@ test('rejects data that is not a CapturedRoom', () => {
   assert.throws(() => parseCapturedRoom({ dimensions: [3, 3, 3] }), /Not a RoomPlan CapturedRoom/);
   assert.throws(() => parseCapturedRoom({ walls: [{ identifier: 'w', category: { wall: {} }, dimensions: [1, 2], transform: [1] }] }), /Not a RoomPlan CapturedRoom/);
   assert.throws(() => parseCapturedRoom('not json'), /Not a RoomPlan CapturedRoom/);
+});
+
+test('plan is the room seen from above, not a mirror image: world -Z (forward) is plan +y', () => {
+  // Square 4 m x 3 m room on the world axes, from (0, 0) forward to z = -3 (RoomPlan: right-handed, y up,
+  // -Z is forward). A sofa near the far-left corner, facing the user (+Z), and a TV on the right wall.
+  const room = buildCapturedRoom({ yawDeg: 0, origin: { x: 0, z: 0 }, walls: [[0, 0, 157, 0], [157, 0, 157, 118], [157, 118, 0, 118], [0, 118, 0, 0]],
+    objects: [{ cat: 'sofa', x: 0, z: 0, w: 84, h: 34, d: 36 }, { cat: 'television', x: 0, z: 0, w: 50, h: 30, d: 4 }] });
+  const M = 1 / 0.0254;
+  // Overwrite the object transforms with hand-written world poses (independent of the builder's mapping).
+  room.objects[0].transform = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.0, -0.8, -2.5, 1];        // local x = +X, front (+z) = +Z
+  room.objects[1].transform = [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 3.9, 0.2, -1.5, 1];       // local x = +Z: turned -90° about Y
+  // Walls must be in the same world frame: check the builder put them at z in [-3, 0].
+  const zs = room.walls.map((w: any) => w.transform[14]);
+  assert.ok(Math.min(...zs) < -2.9 && Math.max(...zs) <= 0.001, 'walls run forward (-Z)');
+  const r = parseCapturedRoom(room);
+  assert.equal(r.alignedByDeg, 0);
+  const [sofa, tv] = r.objects;
+  assert.equal(sofa.xIn, Math.round(1.0 * M));
+  assert.equal(sofa.yIn, Math.round(2.5 * M), 'far (forward) side of the room is plan +y, i.e. the top of the top view');
+  assert.equal(sofa.rotationDeg, 0);
+  assert.equal(tv.xIn, Math.round(3.9 * M)); assert.equal(tv.yIn, Math.round(1.5 * M));
+  // Local x along +Z (toward the user) is plan -y: 270° counterclockwise, i.e. three.js rotation.y = 270°.
+  assert.equal(tv.rotationDeg, 270);
 });

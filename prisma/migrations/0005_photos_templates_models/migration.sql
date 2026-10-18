@@ -211,6 +211,14 @@ ALTER TABLE `proposal_photos` ADD CONSTRAINT `proposal_photos_proposal_id_fkey` 
 ALTER TABLE `proposal_photos` ADD CONSTRAINT `proposal_photos_photo_id_fkey` FOREIGN KEY (`photo_id`) REFERENCES `scan_photos`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
 
 
+-- Scan plan frame. Scans parsed before this release mapped world Z to plan y, which draws a
+-- mirror image of the room. New scans use plan y = -world Z. Mark old scans and the rooms built
+-- from them so the editor can offer the (Michael-only, rollback-able) mirror fix.
+ALTER TABLE `scan_imports` ADD COLUMN `plan_frame` INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE `rooms` ADD COLUMN `plan_frame` INTEGER NULL;
+UPDATE `rooms` r SET r.`plan_frame` = 1
+WHERE r.`draft_workspace_id` IS NULL AND EXISTS (SELECT 1 FROM `scan_imports` si WHERE si.`room_id` = r.`id` AND si.`status` = 'promoted');
+
 -- Backfill: photos uploaded before this migration become scan_photos rows, linked to the scan
 -- import made with the same pairing code (and that scan's room).
 INSERT INTO `scan_photos` (`upload_id`, `scan_import_id`, `room_id`, `created_at`)

@@ -14,7 +14,7 @@ import { measurementHistory, recordMeasurement, unpin } from './measurements.js'
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
 import { attachModel, completeUpload, describeToken, generateUploadToken, importModel, importScan, presignUpload, submitSuggestions, tokenRoomOutline, uploadModelFile } from './uploads.js';
-import { furnishFromScan, getScanImport, listScanImports, promoteScanImport, rejectScanImport } from './scans.js';
+import { fixMirroredRoom, furnishFromScan, getScanImport, listScanImports, promoteScanImport, rejectScanImport } from './scans.js';
 import { listPhotos } from './photos.js';
 import { listTemplates } from './templates.js';
 import { getObject, signedGetUrl } from './storage.js';
@@ -214,6 +214,7 @@ app.get('/api/scans', read, async (c) => {
 });
 app.get('/api/scans/:id', read, async (c) => c.json(await getScanImport(id(c.req.param('id')))));
 app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => c.json(await promoteScanImport(id(c.req.param('id')), 'michael')));
+app.post('/api/rooms/:id/fix-mirror', read, michaelOnly, async (c) => c.json(await fixMirroredRoom(id(c.req.param('id')))));
 app.post('/api/scans/:id/furnish', read, michaelOnly, async (c) => {
   const b = z.object({ name: z.string().min(1).max(120).optional() }).parse(await c.req.json().catch(() => ({})));
   return c.json(await furnishFromScan(id(c.req.param('id')), b.name), 201);
