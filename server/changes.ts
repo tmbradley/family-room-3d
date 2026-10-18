@@ -19,9 +19,14 @@ export type RevChange = {
 };
 
 export type ApplyCtx = {
-  /** The workspace being changed, or null for Current (only rescans and their rollbacks). */
+  /**
+   * The workspace being changed, or null for Current. Current's structure changes only through
+   * rescans, measurements and rollbacks; its furniture and colors only through approved proposals
+   * (and rollbacks). Nothing edits Current directly.
+   */
   workspaceId: number | null;
-  mode: 'save' | 'proposal' | 'rollback' | 'measurement' | 'rescan';
+  /** 'revert' = undo/redo from the editor: the inverse of one earlier revision, applied as a new one. */
+  mode: 'save' | 'proposal' | 'rollback' | 'measurement' | 'rescan' | 'revert';
   /**
    * Internal callers only (scan promotion): may set system fields and create Current rooms.
    * Never set from request input.
@@ -37,7 +42,7 @@ export type ApplyCtx = {
 
 export async function isPinned(tx: Tx, entityType: string, entityId: number, field: string) {
   const pin = await tx.measurement.findFirst({
-    where: { entityType, entityId, field, source: 'manual', isOverride: true, unpinnedAt: null },
+    where: { entityType, entityId, field, source: 'manual', isOverride: true, unpinnedAt: null, withdrawnAt: null },
     select: { id: true },
   });
   return !!pin;
@@ -52,20 +57,27 @@ export async function lockWorkspace(tx: Tx, workspaceId: number) {
 
 const mapId = (ctx: ApplyCtx, type: string, id: number) => ctx.idMap?.get(`${type}:${id}`) ?? id;
 
+/** What Current holds besides structure, and what an approved proposal may change there. */
+export const CURRENT_FURNISHING = ['placement', 'placement_param', 'room_style', 'furniture_item'] as const;
+
+/** Rooms of Current (not drafts). */
+async function currentRoomIds(tx: Tx) {
+  const rows = await tx.room.findMany({ where: { draftWorkspaceId: null }, select: { id: true } });
+  return new Set(rows.map((r) => r.id));
+}
+
 export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   const changes: RevChange[] = [];
   const skipped: string[] = [];
   const refs: Record<string, number> = {};
   const W = ctx.workspaceId;
-  const allowSystem = ctx.mode === 'rollback' || ctx.trusted === true;
-  if (W === null && !(ctx.mode === 'rollback' || (ctx.mode === 'rescan' && ctx.trusted) || ctx.mode === 'measurement'))
-    throw new ApiError(403, 'current_locked', 'Current only changes through a promoted scan, a measurement, or a rollback');
+  // Values replayed from the revision history (rollback, undo/redo) may restore system fields.
+  const allowSystem = ctx.mode === 'rollback' || ctx.mode === 'revert' || ctx.trusted === true;
+  if (W === null && !(ctx.mode === 'rollback' || (ctx.mode === 'rescan' && ctx.trusted) || ctx.mode === 'measurement' || ctx.mode === 'proposal'))
+    throw new ApiError(403, 'current_locked', 'Current only changes through a promoted scan, a measurement, an approved proposal, or a rollback');
   const scopeName = W === null ? 'Current' : `workspace ${W}`;
   let roomIds: Set<number> | null = null;
-  const rooms = async () => {
-    if (W === null) throw new ApiError(403, 'current_locked', 'Current holds structure only; furniture lives in workspaces');
-    return (roomIds ??= await workspaceRoomIds(tx, W));
-  };
+  const rooms = async () => (roomIds ??= W === null ? await currentRoomIds(tx) : await workspaceRoomIds(tx, W));
 
   const resolve = (type: string, field: string, raw: unknown) => {
     if (typeof raw === 'string' && raw.startsWith('$')) {
@@ -113,7 +125,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
 
   /** Template parameter values must fit the placement's template (not checked when restoring history). */
   const checkTemplateParam = async (placementId: number, key: string, value: unknown) => {
-    if (ctx.mode === 'rollback') return String(value);
+    if (ctx.mode === 'rollback' || ctx.mode === 'revert') return String(value);
     const pl = await tx.placement.findUnique({ where: { id: placementId }, include: { template: true } });
     if (!pl?.template) throw new ApiError(400, 'no_template', `placement ${placementId} has no template; set placement.templateId first`);
     return checkParam(pl.template.slug, key, value);
@@ -129,8 +141,9 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     const d = def(op.entityType);
     const model = delegate(tx, op.entityType);
 
-    if (['placement', 'placement_param', 'room_style', 'workspace'].includes(op.entityType) && W === null)
-      throw new ApiError(403, 'current_locked', 'Current holds structure only; furniture lives in workspaces');
+    if (W === null && op.entityType === 'workspace') throw new ApiError(400, 'not_in_workspace', 'Current is not a workspace');
+    if (W === null && ctx.mode === 'proposal' && !(CURRENT_FURNISHING as readonly string[]).includes(op.entityType))
+      throw new ApiError(403, 'current_locked', `A proposal for Current can change furniture and colors (${CURRENT_FURNISHING.join(', ')}); ${op.entityType} changes only through scans and measurements`);
 
     if (op.op === 'create') {
       // Current rooms are created only by a trusted scan promotion (or re-created by a rollback).
@@ -145,7 +158,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       if (op.entityType === 'placement' && !allowSystem) data.workspaceId = W;
       if (op.entityType === 'room_style') {
         data.workspaceId = W;
-        if (await tx.roomStyle.findFirst({ where: { workspaceId: W!, roomId: data.roomId } }))
+        if (await tx.roomStyle.findFirst({ where: { workspaceId: W, roomId: data.roomId } }))
           throw new ApiError(409, 'exists', `room ${data.roomId} already has colors in ${scopeName}; update that room_style instead`);
       }
       if (currentRoom) data.draftWorkspaceId = null;
@@ -156,7 +169,11 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
           throw new ApiError(409, 'exists', `placement ${data.placementId} already has ${data.key}; update it instead`);
       }
       if (op.entityType === 'placement' && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
-      if (op.id != null) data.id = op.id;
+      if (op.id != null) {
+        // Re-creating a deleted row (rollback, undo): its id must still be free.
+        if (await model.findUnique({ where: { id: op.id } })) throw new ApiError(409, 'stale', `${op.entityType} ${op.id} already exists again; it changed since`);
+        data.id = op.id;
+      }
       const row = await model.create({ data });
       if (op.tempRef) refs[op.tempRef] = row.id;
       changes.push({ op: 'create', entityType: op.entityType, entityId: row.id });
@@ -178,7 +195,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
         throw new ApiError(409, 'pinned', `${op.entityType} ${id} ${op.field} is a pinned measurement and can't be changed. Unpin it first.`);
       }
       if (ctx.checkBefore && op.before !== undefined && ser(row[op.field]) !== op.before)
-        throw new ApiError(409, 'stale', `${op.entityType} ${id} ${op.field} changed since this was proposed (was ${op.before}, now ${ser(row[op.field])})`);
+        throw new ApiError(409, 'stale', `${op.entityType} ${id} ${op.field} changed since ${ctx.mode === 'revert' ? 'that edit' : 'this was proposed'} (expected ${op.before}, now ${ser(row[op.field])})`);
       if (ser(row[op.field]) === ser(val)) continue;
       if (op.entityType === 'room_style' && op.field === 'roomId') throw new ApiError(400, 'unknown_field', 'room_style.roomId can\'t change; create a new room_style');
       if (op.entityType === 'placement_param' && (op.field === 'placementId' || op.field === 'key')) throw new ApiError(400, 'unknown_field', `placement_param.${op.field} can't change; delete and create instead`);
@@ -196,7 +213,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     // delete
     if (!d.delete) {
       // Rolling back past the creation of a catalog item removes it again, unless something still uses it.
-      if (ctx.mode === 'rollback' && op.entityType === 'furniture_item') {
+      if ((ctx.mode === 'rollback' || ctx.mode === 'revert') && op.entityType === 'furniture_item') {
         if (await tx.placement.count({ where: { itemId: id } })) { skipped.push(`furniture_item ${id} (still used)`); continue; }
       } else if (ctx.mode === 'rollback' && op.entityType === 'room' && W === null) {
         // Rolling back the scan that created a Current room removes it again, once its walls are gone.
@@ -277,14 +294,15 @@ export async function saveChanges(tx: Tx, workspaceId: number, baseRevision: num
 }
 
 /** Inverse ops for one revision's change rows (newest first). */
-export function inverseOps(rows: { seq: number; op: string; entityType: string; entityId: number; field: string | null; beforeValue: string | null }[]): Op[] {
+export function inverseOps(rows: { seq: number; op: string; entityType: string; entityId: number; field: string | null; beforeValue: string | null; afterValue?: string | null }[]): Op[] {
   const sorted = [...rows].sort((a, b) => a.seq - b.seq);
   const groups: Op[] = [];
   let i = 0;
   while (i < sorted.length) {
     const r = sorted[i];
     if (r.op === 'update' && r.field) {
-      groups.push({ op: 'update', entityType: r.entityType, entityId: r.entityId, field: r.field, after: r.beforeValue });
+      // `before` = what the revision set; undo refuses if it changed since (rollbacks don't check).
+      groups.push({ op: 'update', entityType: r.entityType, entityId: r.entityId, field: r.field, after: r.beforeValue, before: r.afterValue ?? null });
       i++;
     } else if (r.op === 'create' && !r.field) {
       groups.push({ op: 'delete', entityType: r.entityType, entityId: r.entityId });
@@ -301,6 +319,25 @@ export function inverseOps(rows: { seq: number; op: string; entityType: string; 
     } else i++;
   }
   return groups.reverse();
+}
+
+/**
+ * Undo (or redo) from the editor: apply the inverse of one revision of a workspace as a new, normal
+ * revision. History is never rewritten. The caller's base revision must be the latest (else 409
+ * conflict), and every value the revision set must still be in place (else 409 stale), so an undo
+ * never overwrites a later change made elsewhere. Redo = undo of the undo revision.
+ */
+export async function revertRevision(tx: Tx, workspaceId: number, baseRevision: number, number: number, note?: string) {
+  const ws = await lockWorkspace(tx, workspaceId);
+  if (ws.revision !== baseRevision)
+    throw new ApiError(409, 'conflict', `Workspace is at revision ${ws.revision}, your undo was based on ${baseRevision}. Reload to get the latest.`, { revision: ws.revision });
+  const target = await tx.revision.findFirst({ where: { workspaceId, number }, include: { changes: true } });
+  if (!target) throw new ApiError(404, 'revision_not_found', `Revision ${number} of workspace ${workspaceId} not found`);
+  if (target.kind === 'seed' || target.kind === 'copy') throw new ApiError(409, 'before_start', `Revision ${number} is where this workspace started; it can't be undone`);
+  const { changes } = await applyOps(tx, inverseOps(target.changes), { workspaceId, mode: 'revert', checkBefore: true });
+  if (!changes.length) return { revision: ws.revision, unchanged: true, reverted: number };
+  const rev = await commitRevision(tx, { workspaceId, kind: 'save', actor: 'michael', rollsBackRevisionId: target.id, changes, note: (note || `Undid revision ${number}`).slice(0, 1000) });
+  return { revision: rev.number, unchanged: false, reverted: number };
 }
 
 /** Roll a workspace back to the state right after revision `toRevision`. The rollback is itself a new revision. */

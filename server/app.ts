@@ -7,10 +7,10 @@ import { auth, requireAuth, type AuthInfo } from './auth.js';
 import { getHouse, exportHouse } from './house.js';
 import { runExport } from './export.js';
 import { ApiError } from './util.js';
-import { getHistory, rollbackCurrent, rollbackWorkspace, saveChanges, type Op } from './changes.js';
+import { getHistory, revertRevision, rollbackCurrent, rollbackWorkspace, saveChanges, type Op } from './changes.js';
 import { copyWorkspace, createBlankWorkspace, getRoomView, getWorkspaceView, listWorkspaces } from './workspaces.js';
-import { approveProposal, createProposal, getProposal, listProposals, previewProposal, rejectProposal } from './proposals.js';
-import { measurementHistory, recordMeasurement, unpin } from './measurements.js';
+import { approveProposal, createProposal, getProposal, listProposals, previewProposal, proposeAsCurrent, rejectProposal } from './proposals.js';
+import { measurementHistory, recordMeasurement, setWithdrawn, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
 import { attachModel, completeUpload, describeToken, generateUploadToken, importModel, importScan, presignUpload, submitSuggestions, tokenRoomOutline, uploadModelFile } from './uploads.js';
@@ -79,8 +79,11 @@ app.post('/api/export/run', requireAuth('admin'), async (c) => c.json(await runE
 app.get('/api/workspaces', read, async (c) => c.json(await listWorkspaces(prisma)));
 app.get('/api/workspaces/:id', read, async (c) => c.json(await getWorkspaceView(prisma, id(c.req.param('id')))));
 app.post('/api/workspaces', read, michaelOnly, async (c) => {
-  const b = z.object({ name: z.string().min(1).max(120), copyFromWorkspaceId: z.number().int().optional() }).parse(await c.req.json());
-  const ws = await tx(async (t) => (b.copyFromWorkspaceId ? (await copyWorkspace(t, b.copyFromWorkspaceId, b.name, 'michael')).workspace : createBlankWorkspace(t, b.name)));
+  const b = z.object({
+    name: z.string().min(1).max(120), copyFromWorkspaceId: z.number().int().optional(),
+    furnishings: z.enum(['current', 'none']).default('current'), // new design on Current: start from its furniture and colors
+  }).parse(await c.req.json());
+  const ws = await tx(async (t) => (b.copyFromWorkspaceId ? (await copyWorkspace(t, b.copyFromWorkspaceId, b.name, 'michael')).workspace : createBlankWorkspace(t, b.name, 'michael', b.furnishings)));
   return c.json(await getWorkspaceView(prisma, ws.id), 201);
 });
 app.post('/api/workspaces/:id/changes', read, michaelOnly, async (c) => {
@@ -95,6 +98,14 @@ app.post('/api/workspaces/:id/rollback', read, michaelOnly, async (c) => {
   const wsId = id(c.req.param('id'));
   return c.json(await tx((t) => rollbackWorkspace(t, wsId, b.toRevision, b.note)));
 });
+// Undo/redo of a saved edit: a new revision that applies the inverse of revision N (never rewrites history).
+app.post('/api/workspaces/:id/revert', read, michaelOnly, async (c) => {
+  const b = z.object({ baseRevision: z.number().int().min(0), revision: z.number().int().min(1), note: z.string().max(500).optional() }).parse(await c.req.json());
+  const wsId = id(c.req.param('id'));
+  return c.json(await tx((t) => revertRevision(t, wsId, b.baseRevision, b.revision, b.note)));
+});
+// "Make this Current's furniture": files a pending proposal for Current; nothing changes until Michael approves it.
+app.post('/api/workspaces/:id/propose-as-current', read, michaelOnly, async (c) => c.json(await proposeAsCurrent(id(c.req.param('id'))), 201));
 app.get('/api/rooms/:id', read, async (c) => {
   const ws = c.req.query('workspaceId');
   return c.json(await getRoomView(prisma, id(c.req.param('id')), ws ? id(ws) : undefined));
@@ -104,7 +115,7 @@ app.get('/api/rooms/:id', read, async (c) => {
 app.get('/api/proposals', read, async (c) => {
   const status = c.req.query('status') as any;
   const ws = c.req.query('workspaceId');
-  return c.json(await listProposals({ status: ['pending', 'approved', 'rejected'].includes(status) ? status : undefined, workspaceId: ws ? id(ws) : undefined }));
+  return c.json(await listProposals({ status: ['pending', 'approved', 'rejected'].includes(status) ? status : undefined, workspaceId: ws ? id(ws) : undefined, current: c.req.query('current') === '1' }));
 });
 app.get('/api/proposals/:id', read, async (c) => c.json(await getProposal(id(c.req.param('id')))));
 app.get('/api/proposals/:id/preview', read, async (c) => c.json(await previewProposal(id(c.req.param('id')))));
@@ -129,6 +140,11 @@ app.post('/api/measurements', read, michaelOnly, async (c) => {
 app.post('/api/measurements/unpin', read, michaelOnly, async (c) => {
   const b = mBody.pick({ workspaceId: true, entityType: true, entityId: true, field: true }).parse(await c.req.json());
   return c.json(await tx((t) => unpin(t, b)));
+});
+// Undo/redo of a measurement: withdraw it (the field falls back to the previous measurement) or restore it.
+app.post('/api/measurements/:id/withdraw', read, michaelOnly, async (c) => {
+  const b = z.object({ withdrawn: z.boolean(), restoreIn: z.number().min(0).max(100000).optional(), workspaceId: z.number().int().nullable().optional() }).parse(await c.req.json());
+  return c.json(await tx((t) => setWithdrawn(t, { measurementId: id(c.req.param('id')), ...b })));
 });
 app.get('/api/measurements', read, async (c) => c.json(await measurementHistory(prisma, c.req.query('entityType') ?? '', id(c.req.query('entityId') ?? ''))));
 
@@ -255,7 +271,7 @@ app.get('/login.js', serveStatic({ path: './server/public/login.js' }));
 // Pairing link (https://<host>/scan?token=...): opens the iPhone app; this page is the fallback. Shows only the code.
 app.get('/scan', serveStatic({ path: './server/public/scan.html' }));
 app.get('/scan.js', serveStatic({ path: './server/public/scan.js' }));
-for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js']) {
+for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js', 'undo.js']) {
   app.get(`/${f}`, serveStatic({ path: `./${f}` }));
 }
 app.get('/', serveStatic({ path: './index.html' }));

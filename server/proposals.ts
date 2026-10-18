@@ -7,8 +7,8 @@ import { z } from 'zod';
 import type { Actor, Prisma } from '@prisma/client';
 import { ApiError } from './util.js';
 import { coerce, def, delegate, fieldSpec, ser, type Tx } from './entities.js';
-import { applyOps, commitRevision, lockWorkspace, type Op } from './changes.js';
-import { copyWorkspace, getWorkspaceView } from './workspaces.js';
+import { applyOps, commitRevision, lockHouse, lockWorkspace, type Op } from './changes.js';
+import { copyWorkspace, getCurrentView, getWorkspaceView } from './workspaces.js';
 import { prisma } from './db.js';
 import { listPhotos } from './photos.js';
 import { recordMeasurement } from './measurements.js';
@@ -29,7 +29,8 @@ export const changeSchema = z.discriminatedUnion('op', [
 export const proposalShape = {
   title: z.string().min(3).max(200),
   rationale: z.string().min(1).max(5000).describe('Why this fits the room and the design'),
-  workspaceId: z.number().int().optional().describe('Target workspace. Omit and pass newWorkspace to propose a new design.'),
+  workspaceId: z.number().int().optional().describe('Target workspace. Omit and pass newWorkspace to propose a new design, or current: true for Current.'),
+  current: z.boolean().optional().describe('Target Current, the house as it is now: only furniture (placement, placement_param, furniture_item) and room colors (room_style). Its structure changes only through scans and measurements.'),
   newWorkspace: z.object({ name: z.string().min(1).max(120), copyFromWorkspaceId: z.number().int() }).optional()
     .describe('Create a new workspace on approval, copied from copyFromWorkspaceId. Entity ids in changes refer to that source workspace.'),
   roomIds: z.array(z.number().int()).min(1).max(20),
@@ -87,10 +88,14 @@ export async function dryRun<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
 }
 
 /** Apply a proposal's ops to its target (or a fresh copy of its base). Returns the workspace changed. */
-async function applyProposal(tx: Tx, p: { id: number; targetWorkspaceId: number | null; baseWorkspaceId: number | null; newWorkspaceName: string | null; createdBy: Actor }, ops: Op[], forReal: boolean) {
-  let workspaceId: number;
+async function applyProposal(tx: Tx, p: { id: number; houseId: number; targetCurrent: boolean; targetWorkspaceId: number | null; baseWorkspaceId: number | null; newWorkspaceName: string | null; createdBy: Actor }, ops: Op[], forReal: boolean) {
+  let workspaceId: number | null;
   let idMap: Map<string, number> | undefined;
-  if (p.targetWorkspaceId != null) {
+  if (p.targetCurrent) {
+    const house = await lockHouse(tx, p.houseId);
+    if (house.currentRevision == null) throw new ApiError(409, 'no_current', 'There is no Current yet');
+    workspaceId = null;
+  } else if (p.targetWorkspaceId != null) {
     workspaceId = (await lockWorkspace(tx, p.targetWorkspaceId)).id;
   } else {
     if (p.baseWorkspaceId == null) throw new ApiError(409, 'no_base', 'The workspace this proposal copies from no longer exists');
@@ -104,17 +109,26 @@ async function applyProposal(tx: Tx, p: { id: number; targetWorkspaceId: number 
 
 export async function createProposal(input: ProposalInput, by: { actor: Actor; agentKeyId?: number }) {
   const p = proposalSchema.parse(input);
-  if ((p.workspaceId == null) === (p.newWorkspace == null)) throw new ApiError(400, 'target_required', 'Pass exactly one of workspaceId or newWorkspace');
-  const sourceWsId = p.workspaceId ?? p.newWorkspace!.copyFromWorkspaceId;
-  const sourceWs = await prisma.workspace.findUnique({ where: { id: sourceWsId } });
-  if (!sourceWs) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceWsId} not found`);
+  const current = p.current === true;
+  if ([p.workspaceId != null, p.newWorkspace != null, current].filter(Boolean).length !== 1)
+    throw new ApiError(400, 'target_required', 'Pass exactly one of workspaceId, newWorkspace or current: true');
   for (const s of p.cost.steps) if (s.highUsd < s.lowUsd) throw new ApiError(400, 'invalid_cost', `Cost step "${s.changes}": high is below low`);
 
-  // Rooms must be in the workspace.
-  const view = await getWorkspaceView(prisma, sourceWsId);
+  // Rooms must be in the target.
+  let houseId: number, baseRevision: number, view: { rooms: { id: number; label: string }[] }, scopeName: string;
+  if (current) {
+    const house = await prisma.house.findFirst({ orderBy: { id: 'asc' } });
+    if (!house || house.currentRevision == null) throw new ApiError(409, 'no_current', 'There is no Current yet');
+    houseId = house.id; baseRevision = house.currentRevision; view = await getCurrentView(prisma); scopeName = 'Current';
+  } else {
+    const sourceWsId = p.workspaceId ?? p.newWorkspace!.copyFromWorkspaceId;
+    const sourceWs = await prisma.workspace.findUnique({ where: { id: sourceWsId } });
+    if (!sourceWs) throw new ApiError(404, 'workspace_not_found', `Workspace ${sourceWsId} not found`);
+    houseId = sourceWs.houseId; baseRevision = sourceWs.revision; view = await getWorkspaceView(prisma, sourceWsId); scopeName = `workspace ${sourceWsId}`;
+  }
   const roomIds = new Set(view.rooms.map((r) => r.id));
   const badRoom = p.roomIds.find((r) => !roomIds.has(r));
-  if (badRoom != null) throw new ApiError(400, 'room_not_in_workspace', `Room ${badRoom} isn't in workspace ${sourceWsId}. Rooms: ${view.rooms.map((r) => `${r.id} ${r.label}`).join(', ')}`);
+  if (badRoom != null) throw new ApiError(400, 'room_not_in_workspace', `Room ${badRoom} isn't in ${scopeName}. Rooms: ${view.rooms.map((r) => `${r.id} ${r.label}`).join(', ')}`);
 
   // Expand to stored rows, filling "before" from the live data.
   const rows: Prisma.ProposalChangeCreateManyProposalInput[] = [];
@@ -145,7 +159,7 @@ export async function createProposal(input: ProposalInput, by: { actor: Actor; a
   const ops = opsFromRows(rows.map((r) => ({ entityId: null, tempRef: null, field: null, beforeValue: null, afterValue: null, ...r })) as any);
 
   // Dry run: the whole change list must apply cleanly (ownership, refs, pins) before it is stored.
-  await dryRun((tx) => applyProposal(tx, { id: 0, targetWorkspaceId: p.workspaceId ?? null, baseWorkspaceId: p.newWorkspace?.copyFromWorkspaceId ?? null, newWorkspaceName: p.newWorkspace?.name ?? null, createdBy: by.actor }, ops, false));
+  await dryRun((tx) => applyProposal(tx, { id: 0, houseId, targetCurrent: current, targetWorkspaceId: p.workspaceId ?? null, baseWorkspaceId: p.newWorkspace?.copyFromWorkspaceId ?? null, newWorkspaceName: p.newWorkspace?.name ?? null, createdBy: by.actor }, ops, false));
 
   const photoIds = [...new Set(p.photoIds ?? [])];
   if (photoIds.length) {
@@ -156,10 +170,10 @@ export async function createProposal(input: ProposalInput, by: { actor: Actor; a
   const cents = (usd: number) => Math.round(usd * 100);
   const created = await prisma.proposal.create({
     data: {
-      houseId: sourceWs.houseId, createdBy: by.actor, agentKeyId: by.agentKeyId ?? null,
-      sourceKind: p.source.kind, sourceUrl: p.source.url, sourceImageUrl: p.source.imageUrl,
+      houseId, createdBy: by.actor, agentKeyId: by.agentKeyId ?? null,
+      sourceKind: p.source.kind, sourceUrl: p.source.url, sourceImageUrl: p.source.imageUrl, targetCurrent: current,
       targetWorkspaceId: p.workspaceId ?? null, newWorkspaceName: p.newWorkspace?.name ?? null, baseWorkspaceId: p.newWorkspace?.copyFromWorkspaceId ?? null,
-      title: p.title, rationale: p.rationale, baseRevision: sourceWs.revision,
+      title: p.title, rationale: p.rationale, baseRevision,
       costLowCents: p.cost.steps.reduce((a, s) => a + cents(s.lowUsd), 0),
       costHighCents: p.cost.steps.reduce((a, s) => a + cents(s.highUsd), 0),
       rooms: { create: p.roomIds.map((roomId) => ({ roomId })) },
@@ -260,7 +274,7 @@ export async function getProposal(id: number) {
     kind: p.kind,
     id: p.id, title: p.title, status: p.status, createdAt: p.createdAt, createdBy: p.createdBy, agent: p.agentKey?.name ?? null,
     source: { kind: p.sourceKind, url: p.sourceUrl, imageUrl: p.sourceImageUrl },
-    target: p.kind === 'measurements' ? { kind: 'current' as const, workspace: null }
+    target: p.kind === 'measurements' || p.targetCurrent ? { kind: 'current' as const, workspace: null, what: p.kind === 'measurements' ? 'measurements' as const : 'furnishings' as const }
       : p.newWorkspaceName && (p.targetWorkspaceId == null || p.status === 'approved')
       ? { kind: 'new_workspace' as const, name: p.newWorkspaceName, copyFrom: p.baseWorkspace, createdWorkspace: p.status === 'approved' ? p.targetWorkspace : null }
       : { kind: 'workspace' as const, workspace: p.targetWorkspace },
@@ -275,11 +289,12 @@ export async function getProposal(id: number) {
   };
 }
 
-export async function listProposals(filter: { status?: 'pending' | 'approved' | 'rejected'; workspaceId?: number; limit?: number } = {}) {
+export async function listProposals(filter: { status?: 'pending' | 'approved' | 'rejected'; workspaceId?: number; current?: boolean; limit?: number } = {}) {
   const rows = await prisma.proposal.findMany({
     where: {
       status: filter.status,
       ...(filter.workspaceId != null ? { OR: [{ targetWorkspaceId: filter.workspaceId }, { baseWorkspaceId: filter.workspaceId }] } : {}),
+      ...(filter.current ? { OR: [{ targetCurrent: true }, { kind: 'measurements' as const }] } : {}),
     },
     orderBy: { id: 'desc' }, take: Math.min(filter.limit ?? 50, 200), select: { id: true },
   });
@@ -293,7 +308,7 @@ export async function previewProposal(id: number) {
   if (p.kind === 'measurements') throw new ApiError(400, 'no_preview', 'Measurement proposals have no 3D preview; the values are listed on the card');
   return dryRun(async (tx) => {
     const r = await applyProposal(tx, p, opsFromRows(p.changes), false);
-    const view = await getWorkspaceView(tx, r.workspaceId);
+    const view = r.workspaceId == null ? await getCurrentView(tx) : await getWorkspaceView(tx, r.workspaceId);
     return { ...view, preview: { proposalId: id, title: p.title, changedEntities: [...new Set(r.changes.map((c) => `${c.entityType}:${c.entityId}`))] } };
   });
 }
@@ -319,7 +334,7 @@ export async function approveProposal(id: number, note?: string) {
     }
     const r = await applyProposal(tx, p, opsFromRows(p.changes), true);
     const rev = await commitRevision(tx, {
-      workspaceId: r.workspaceId, kind: 'proposal', actor: p.createdBy, agentKeyId: p.agentKeyId, proposalId: p.id, changes: r.changes,
+      workspaceId: r.workspaceId, houseId: p.houseId, kind: 'proposal', actor: p.createdBy, agentKeyId: p.agentKeyId, proposalId: p.id, changes: r.changes,
       note: `Approved by Michael: #${p.id} ${p.title}${note ? ` (${note})` : ''}`,
     });
     await tx.proposal.update({ where: { id }, data: { status: 'approved', decidedAt: new Date(), decisionNote: note?.slice(0, 1000), targetWorkspaceId: r.workspaceId } });
@@ -341,4 +356,63 @@ async function measurementScope(tx: Tx, entityType: string, entityId: number): P
     : entityType === 'wall' ? (await tx.wall.findUniqueOrThrow({ where: { id: entityId } })).roomId
     : (await tx.wall.findUniqueOrThrow({ where: { id: (await tx.opening.findUniqueOrThrow({ where: { id: entityId } })).wallId } })).roomId;
   return (await tx.room.findUniqueOrThrow({ where: { id: roomId } })).draftWorkspaceId;
+}
+
+const STYLE_FIELDS = ['wallColorName', 'wallColor', 'trimColorName', 'trimColor', 'floorColorName', 'floorColor', 'deviceColorName', 'deviceColor'] as const;
+
+/**
+ * "Make this Current's furniture": a pending proposal (Michael approves it in Proposals) that sets
+ * Current's furniture and colors, in the Current rooms this workspace links, to what the workspace
+ * has. Pieces marked existing or keep are copied (with template parameters and 3D models); pieces
+ * marked new, replace or remove are design ideas and are left out. Current's old pieces in those
+ * rooms are removed. The workspace itself is not changed.
+ */
+export async function proposeAsCurrent(workspaceId: number) {
+  const ws = await prisma.workspace.findUnique({ where: { id: workspaceId } });
+  if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
+  const links = await prisma.workspaceRoom.findMany({ where: { workspaceId }, include: { room: { select: { id: true, label: true, draftWorkspaceId: true } } } });
+  const rooms = links.map((l) => l.room).filter((r) => r.draftWorkspaceId == null);
+  if (!rooms.length) throw new ApiError(409, 'no_current_rooms', 'This workspace has no Current rooms');
+  const roomIds = rooms.map((r) => r.id);
+  const [pls, oldPls, styles, oldStyles] = await Promise.all([
+    prisma.placement.findMany({ where: { workspaceId, roomId: { in: roomIds } }, orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } }, item: { select: { name: true } } } }),
+    prisma.placement.findMany({ where: { workspaceId: null, roomId: { in: roomIds } }, orderBy: { id: 'asc' } }),
+    prisma.roomStyle.findMany({ where: { workspaceId, roomId: { in: roomIds } } }),
+    prisma.roomStyle.findMany({ where: { workspaceId: null, roomId: { in: roomIds } } }),
+  ]);
+  const keep = pls.filter((p) => p.action === 'existing' || p.action === 'keep');
+  const skipped = pls.filter((p) => !keep.includes(p));
+  const changes: any[] = [];
+  for (const p of oldPls) changes.push({ op: 'delete', entityType: 'placement', entityId: p.id });
+  keep.forEach((p, i) => {
+    const fields: Record<string, any> = { roomId: p.roomId, itemId: p.itemId, xIn: p.xIn, yIn: p.yIn, rotationDeg: p.rotationDeg, action: 'existing' };
+    if (p.notes) fields.notes = p.notes;
+    if (p.templateId != null) fields.templateId = p.templateId;
+    if (p.modelId != null) fields.modelId = p.modelId;
+    changes.push({ op: 'create', entityType: 'placement', tempRef: `p${i}`, fields });
+    p.params.forEach((x, j) => changes.push({ op: 'create', entityType: 'placement_param', tempRef: `p${i}k${j}`, fields: { placementId: `$p${i}`, key: x.key, value: x.value } }));
+  });
+  for (const st of styles) {
+    const old = oldStyles.find((o) => o.roomId === st.roomId);
+    if (!old) {
+      const fields: Record<string, any> = { roomId: st.roomId };
+      for (const f of STYLE_FIELDS) if (st[f] != null) fields[f] = st[f];
+      if (Object.keys(fields).length > 1) changes.push({ op: 'create', entityType: 'room_style', tempRef: `s${st.roomId}`, fields });
+    } else for (const f of STYLE_FIELDS) if (st[f] !== old[f]) changes.push({ op: 'update', entityType: 'room_style', entityId: old.id, field: f, value: st[f] });
+  }
+  if (!changes.length) throw new ApiError(409, 'nothing_to_change', "Current already has this workspace's furniture and colors");
+  if (changes.length > 200) throw new ApiError(400, 'too_many_changes', `That is ${changes.length} changes; a proposal holds 200. Split the rooms into separate workspaces.`);
+  const names = rooms.map((r) => r.label).join(', ');
+  const rationale = [
+    `Michael asked to make the furniture and colors in "${ws.name}" (revision ${ws.revision}) what is in the house now.`,
+    `${keep.length} piece(s) marked existing or keep are copied into Current${oldPls.length ? `, replacing Current's ${oldPls.length} piece(s) in ${names}` : ` for ${names}`}.`,
+    styles.length ? `Colors for ${styles.length} room(s) are copied.` : 'No colors are set in this workspace.',
+    skipped.length ? `Left out as design ideas (new, replace or remove): ${skipped.map((p) => p.item.name).join(', ')}.` : '',
+    `The workspace itself is not changed. Approving makes a normal Current revision, which can be rolled back.`,
+  ].filter(Boolean).join(' ');
+  return createProposal({
+    title: `Make "${ws.name}" Current's furniture`.slice(0, 200), rationale, current: true, roomIds,
+    source: { kind: 'manual' }, changes,
+    cost: { steps: [{ step: 'furniture', changes: 'Records what is already in the room; nothing to buy', lowUsd: 0, highUsd: 0 }] },
+  }, { actor: 'michael' });
 }

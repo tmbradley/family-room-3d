@@ -20,7 +20,7 @@ const roomInclude = (workspaceId: number | null) => ({
     include: { item: true, template: { select: { id: true, slug: true, name: true } }, params: { orderBy: { key: 'asc' as const } }, model: { include: { upload: { select: { format: true, bytes: true } } } } },
     orderBy: { id: 'asc' as const },
   },
-  roomStyles: { where: { workspaceId: workspaceId ?? -1 } },
+  roomStyles: { where: { workspaceId } }, // null = Current's own colors
 });
 
 export async function roomViews(tx: Tx, where: any, workspaceId: number | null) {
@@ -81,14 +81,22 @@ export async function getWorkspaceView(tx: Tx, workspaceId: number) {
   };
 }
 
+/** Current: the house as it is now (structure, existing furniture and colors). Locked. */
+export async function getCurrentView(tx: Tx) {
+  const house = await tx.house.findFirst({ orderBy: { id: 'asc' } });
+  if (!house) throw new ApiError(404, 'not_seeded', 'No house yet');
+  const rooms = await roomViews(tx, { houseId: house.id, draftWorkspaceId: null }, null);
+  return { id: null, name: 'Current', notes: null, revision: house.currentRevision ?? 0, baseRevision: null, basedOnCurrent: false, editable: false, current: true, units: 'in', rooms };
+}
+
+/** A room with the furniture and colors of a workspace, or of Current when no workspace is given. */
 export async function getRoomView(tx: Tx, roomId: number, workspaceId?: number) {
   const room = await tx.room.findUnique({ where: { id: roomId } });
   if (!room) throw new ApiError(404, 'room_not_found', `Room ${roomId} not found`);
   const ws = workspaceId ?? room.draftWorkspaceId;
-  if (ws == null) throw new ApiError(400, 'workspace_required', 'This is a Current room; pass workspaceId to see a design');
   if (room.draftWorkspaceId != null && room.draftWorkspaceId !== ws) throw new ApiError(400, 'not_in_workspace', `Room ${roomId} belongs to workspace ${room.draftWorkspaceId}`);
-  const [view] = await roomViews(tx, { id: roomId }, ws);
-  return { workspaceId: ws, ...view };
+  const [view] = await roomViews(tx, { id: roomId }, ws ?? null);
+  return { workspaceId: ws ?? null, current: ws == null, ...view };
 }
 
 /**
@@ -166,12 +174,38 @@ export async function copyWorkspace(tx: Tx, sourceId: number, name: string, crea
   return { workspace: await tx.workspace.findUniqueOrThrow({ where: { id: ws.id } }), idMap };
 }
 
-/** A blank design on top of Current: links every Current room (no furniture yet). */
-export async function createBlankWorkspace(tx: Tx, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael') {
+/**
+ * A design on top of Current: links every Current room. With furnishings 'current' (the default for
+ * new designs) it starts from the house as it is now: Current's furniture placements (with template
+ * parameters and 3D models) and room colors are copied in, so the design can change them freely.
+ */
+export async function createBlankWorkspace(tx: Tx, name: string, createdBy: 'michael' | 'agent' | 'system' = 'michael', furnishings: 'current' | 'none' = 'none') {
   const house = await tx.house.findFirst({ orderBy: { id: 'asc' } });
   if (!house) throw new ApiError(404, 'not_seeded', 'No house yet');
   const ws = await tx.workspace.create({ data: { houseId: house.id, name, revision: 0, createdBy, baseRevision: house.currentRevision } });
   const current = await tx.room.findMany({ where: { houseId: house.id, draftWorkspaceId: null }, select: { id: true } });
   if (current.length) await tx.workspaceRoom.createMany({ data: current.map((r) => ({ workspaceId: ws.id, roomId: r.id })) });
-  return ws;
+  if (furnishings === 'current') {
+    const copied = await copyCurrentFurnishings(tx, ws.id);
+    await commitRevision(tx, {
+      workspaceId: ws.id, kind: 'copy', actor: createdBy, changes: [{ op: 'create', entityType: 'workspace', entityId: ws.id }],
+      note: `Started from Current (revision ${house.currentRevision ?? 0}): ${copied.placements} piece(s), colors for ${copied.styles} room(s)`,
+    });
+  }
+  return tx.workspace.findUniqueOrThrow({ where: { id: ws.id } });
+}
+
+/** Copy Current's placements (+ params) and room colors into a workspace. */
+export async function copyCurrentFurnishings(tx: Tx, workspaceId: number) {
+  const pls = await tx.placement.findMany({ where: { workspaceId: null }, orderBy: { id: 'asc' }, include: { params: { orderBy: { id: 'asc' } } } });
+  const idMap = new Map<number, number>();
+  for (const p of pls) {
+    const { id, workspaceId: _w, replacesPlacementId, params, ...pl } = p;
+    const np = await tx.placement.create({ data: { ...pl, workspaceId, replacesPlacementId: replacesPlacementId != null ? idMap.get(replacesPlacementId) ?? null : null } });
+    idMap.set(id, np.id);
+    if (params.length) await tx.placementParam.createMany({ data: params.map((x) => ({ placementId: np.id, key: x.key, value: x.value })) });
+  }
+  const styles = await tx.roomStyle.findMany({ where: { workspaceId: null } });
+  if (styles.length) await tx.roomStyle.createMany({ data: styles.map(({ id, workspaceId: _w, ...st }) => ({ ...st, workspaceId })) });
+  return { placements: pls.length, styles: styles.length };
 }
