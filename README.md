@@ -20,37 +20,25 @@ Where this is headed: [PLAN.md](PLAN.md).
   overhead orthographic plan.
 - **Furniture:** tap to select, drag to move, **R** to rotate 90°, **Delete** to remove, **Esc** to deselect.
   "In this design" marks a piece existing / keep / replace / remove / new.
-- **Tabs:** click to show in the focused pane, double-click to rename, ✕ to close, ＋ to create a blank
-  workspace or copy one.
-
-## Files
-
-- `index.html`, `style.css`: page and styles (sidebar becomes a bottom sheet on phones)
-- `main.js`: app (tabs, panes, sync, proposals, history, measurements, saving)
-- `scene.js`: `RoomView`, one 3D/top view built from API data (walls, openings, furniture builders)
-- `api.js`: API client; `catalog.js`: furniture presets for "Add furniture"
-- `server/`: Hono app on Railway
-  - `app.ts` routes, `index.ts` startup, `auth.ts` passkeys / sessions / agent keys
-  - `entities.ts` what a change may touch (field registry), `changes.ts` the change engine, revisions, rollback
-  - `workspaces.ts` views and copies, `proposals.ts` proposals, `measurements.ts` measurements and pins
-  - `mcp.ts` MCP server at `/mcp`; `house.ts`, `export.ts`, `seed.ts`, `bootstrap.ts`
-  - `uploads.ts` phone pairing codes and presigned uploads, `scans.ts` RoomPlan parser, scan review and promote to Current
-- `ios/`: the House Planner iPhone app (RoomPlan scan + guided photos, Object Capture, on-device text); build in Xcode, TestFlight; see `ios/README.md` and `SCAN_SETUP.md`
-- `fixtures/`: RoomPlan `CapturedRoom` sample + generator used by the tests
-- `prisma/`: fully relational MySQL schema and migrations
-- `scripts/`: `predeploy.ts` (runs on every start: table snapshot to the bucket, then `prisma migrate deploy`),
-  `seed.ts`, `create-setup-code.ts`, `create-agent-key.ts`
-- `tests/`: `npm test` (runs only against `TEST_DATABASE_URL`: a new, empty MySQL database whose name contains "test")
+- **Layout:** top bar (breadcrumb, Scan room, Inbox, account), sidebar (Current rooms, designs grouped by
+  room, archived designs), toolbar, canvas, and a details panel on the right (Details / Proposals / History).
+  On a phone the sidebar slides in and the details panel is a bottom sheet.
+- **Designs:** click the name in the breadcrumb to rename; the ⋯ menu renames, duplicates, exports or archives.
+  Names are unique per room. Archived designs are read-only and can be restored; nothing is deleted.
+- **Compare** shows a design next to Current, another design or a proposal, with added / changed / removed
+  marks. **Save to Current…** shows what goes in and what stays an idea; confirming it is the approval.
+  Approving shows an Undo toast; History rollback still works.
 
 ## API (session cookie, or `Authorization: Bearer <agent key>` for reads and proposals)
 
 `GET /health` · `GET /api/house` · `GET /api/workspaces[/:id]` · `GET /api/workspaces/:id/history` ·
-`GET /api/rooms/:id` · `GET /api/proposals[?status=]` · `GET /api/proposals/:id[/preview]` · `POST /api/proposals` (propose scope) ·
+`GET /api/rooms/:id` · `GET /api/workspaces/name-check?name=` · `GET /api/proposals[?status=]` · `GET /api/proposals/:id[/preview]` · `POST /api/proposals` (propose scope) ·
 Michael only: `POST /api/workspaces`, `/api/workspaces/:id/changes`, `/api/workspaces/:id/rollback`,
 `/api/proposals/:id/approve|reject`, `/api/measurements`, `/api/measurements/unpin`,
 `/api/upload-tokens` (pair phone; `{placementId}` for Capture this piece), `/api/scans/:id/promote|reject|furnish`,
 `/api/current/rollback`, `/api/rooms/:id/fix-mirror`, `POST /api/models`, `/api/placements/:id/model`,
-`/api/workspaces/:id/revert` (undo/redo), `/api/workspaces/:id/propose-as-current`, `/api/measurements/:id/withdraw`.
+`/api/workspaces/:id/revert` (undo/redo), `/api/workspaces/:id/propose-as-current`, `GET|POST /api/workspaces/:id/save-to-current`,
+`/api/workspaces/:id/archive`, `/api/proposals/:id/undo-approve`, `/api/measurements/:id/withdraw`.
 Read: `GET /api/scans[/:id]`, `GET /api/current/history`, `GET /api/photos?roomId=|scanImportId=` (signed URLs, 10 min),
 `GET /api/templates`, `GET /api/models/:id[/file]`. Pairing code only (iPhone app): `/api/upload-tokens/validate|room`,
 `/api/uploads/presigned`, `/api/uploads/:id/complete`, `/api/scans/import`, `/api/models/import`, `/api/suggestions`. Current changes only through promoted scans,

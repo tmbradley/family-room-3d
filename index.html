@@ -15,116 +15,64 @@
 </head>
 <body>
 <div id="app">
-  <aside id="sidebar">
-    <header>
-      <h1>House planner</h1>
-      <div class="sub" id="whoami">Loading…</div>
-      <div id="houseStatus" class="empty-state" role="status">
-        <strong>No Current yet.</strong> Create one from a scan or confirmed measurements.
-      </div>
-    </header>
+  <!-- Top bar: where you are, scanning, the inbox, who you are -->
+  <header id="top">
+    <button id="btnSide" class="tbtn icon-only" aria-label="Designs and rooms" title="Designs and rooms">☰</button>
+    <div class="logo"><i></i><span>House planner</span></div>
+    <nav class="crumb" id="crumb" aria-label="Where you are"></nav>
+    <button id="btnScan" class="tbtn edit-only" title="Scan a room with the iPhone app">📱 <span class="lbl-t">Scan room</span></button>
+    <div class="pop-wrap">
+      <button id="btnInbox" class="tbtn" aria-haspopup="true" title="Pending proposals and scans">Inbox <span id="inboxN" class="badge" hidden>0</span></button>
+      <div id="inboxPop" class="pop right" hidden></div>
+    </div>
+    <div class="pop-wrap">
+      <button id="btnMe" class="avatar" aria-haspopup="true" title="Account">··</button>
+      <div id="mePop" class="pop right" hidden></div>
+    </div>
+  </header>
 
-    <section>
-      <h2>View</h2>
-      <div class="row">
-        <button id="btn3d" class="active">3D view</button>
-        <button id="btnTop">Top view</button>
-      </div>
-      <div class="row"><button id="btnWalls">Walls: cutaway (3')</button></div>
-      <label class="check"><input type="checkbox" id="snapToggle" checked> Snap to 3"</label>
-      <label class="check"><input type="checkbox" id="labelToggle" checked> Show labels</label>
-    </section>
+  <!-- Sidebar: Current house (locked) and designs -->
+  <aside id="side" aria-label="Rooms and designs"></aside>
 
-    <section id="selPanel">
-      <h2>Selected</h2>
-      <div id="selInfo" class="muted">Tap a piece to select it. Drag to move.</div>
-      <div class="row">
-        <button id="btnRotate" disabled>Rotate 90° (R)</button>
-        <button id="btnDelete" class="danger" disabled>Delete</button>
-      </div>
-      <div id="tplPanel" hidden></div>
-      <label id="actionRow" hidden>In this design
-        <select id="actionSel">
-          <option value="existing">existing (as is)</option><option value="keep">keep</option>
-          <option value="replace">replace</option><option value="remove">remove</option><option value="new">new</option>
-        </select>
-      </label>
-    </section>
+  <!-- One toolbar for what is open -->
+  <div id="tool" role="toolbar"></div>
 
-    <section id="photoSection" hidden>
-      <h2>Room photos &amp; colors</h2>
-      <div id="roomStyle" class="small"></div>
-      <div id="photoStrip" class="photo-strip"></div>
-    </section>
-
-    <section>
-      <h2>Measurements</h2>
-      <div id="measPanel" class="muted small">Select a piece, or see the room below.</div>
-    </section>
-
-    <section class="edit-only">
-      <h2>Add furniture</h2>
-      <div id="catalogList" class="grid"></div>
-    </section>
-
-    <section class="edit-only">
-      <h2>Custom box</h2>
-      <form id="customForm">
-        <input id="cName" placeholder="Name" value="Bookshelf" required>
-        <div class="row three">
-          <label>W" <input id="cW" type="number" min="1" step="1" value="36" required></label>
-          <label>D" <input id="cD" type="number" min="1" step="1" value="14" required></label>
-          <label>H" <input id="cH" type="number" min="1" step="1" value="72" required></label>
+  <!-- Canvas: one view, or two in Compare -->
+  <main id="canvas">
+    <div id="panes"></div>
+    <div id="banner" class="banner" hidden></div>
+    <div id="legend" class="legend" hidden><span><i style="background:#1e9e5a"></i>added</span><span><i style="background:#f0b400"></i>changed</span><span><i style="background:#a3341f"></i>removed</span></div>
+    <div id="diffbar" class="diffbar" hidden></div>
+    <div id="floatbar" class="floatbar edit-only" hidden>
+      <button data-fb="rotate" title="Rotate 90° (R)">⟳ <span class="lbl-t">Rotate</span></button>
+      <button data-fb="duplicate" title="Duplicate this piece">⧉ <span class="lbl-t">Duplicate</span></button>
+      <button data-fb="delete" title="Delete (Del)">🗑 <span class="lbl-t">Delete</span></button>
+    </div>
+    <div id="vctl" class="vctl">
+      <button id="btn3d" title="3D view">3D</button><button id="btnTop" title="Top view">Top</button>
+      <button id="btnWalls" title="Walls: cutaway (3') or full">Walls: cutaway</button>
+      <button id="btnLabels" title="Show labels">Labels ✓</button>
+      <div class="pop-wrap"><button id="btnGear" title="View settings" aria-haspopup="true">⚙</button>
+        <div id="gearPop" class="pop up right" hidden>
+          <label class="check"><input type="checkbox" id="snapToggle" checked> Snap to 3"</label>
         </div>
-        <div class="row">
-          <label class="grow">Color <input id="cColor" type="color" value="#6b4429"></label>
-          <button type="submit">Add box</button>
-        </div>
-      </form>
-    </section>
-
-    <section>
-      <h2>Scanning</h2>
-      <button id="btnPairPhone">Pair phone</button>
-      <p class="muted small">Scan a room with the House Planner iPhone app (RoomPlan + guided photos). Scans wait here for review before they change Current.</p>
-      <div id="scanImports" class="small"></div>
-    </section>
-
-    <section>
-      <h2>Data</h2>
-      <div class="row"><button id="btnExport">Export workspace JSON</button></div>
-      <div id="saveStatus" class="muted small">Every edit is saved as a revision.</div>
-    </section>
-  </aside>
-
-  <main id="main">
-    <div id="tabbar">
-      <div id="tabs" role="tablist"></div>
-      <div class="tabtools">
-        <div class="menu-wrap">
-          <button id="btnNew" title="New workspace" class="edit-only">＋</button>
-          <div id="newMenu" class="menu" hidden></div>
-        </div>
-        <button id="btnUndo" class="edit-only" title="Undo (⌘Z / Ctrl+Z)" aria-label="Undo" disabled>↶ Undo</button>
-        <button id="btnRedo" class="edit-only" title="Redo (⇧⌘Z / Ctrl+Y)" aria-label="Redo" disabled>↷ Redo</button>
-        <button id="btnSplit" title="Split view">Split</button>
-        <label class="check sync"><input type="checkbox" id="syncToggle" checked> Sync</label>
-        <button id="btnProposals">Proposals <span id="pendingCount" class="badge" hidden>0</span></button>
-        <button id="btnHistory">History</button>
       </div>
     </div>
-    <div id="panes"></div>
   </main>
 
-  <aside id="drawer" hidden>
-    <div class="drawer-head">
-      <h2 id="drawerTitle">Proposals</h2>
-      <select id="propFilter"><option value="pending">Pending</option><option value="">All</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
-      <button id="drawerClose" aria-label="Close">✕</button>
+  <!-- Inspector: Details / Proposals / History -->
+  <aside id="insp" aria-label="Inspector">
+    <div class="itabs" role="tablist">
+      <button data-tab="details" role="tab">Details</button>
+      <button data-tab="proposals" role="tab">Proposals <span id="propN" class="badge" hidden>0</span></button>
+      <button data-tab="history" role="tab">History</button>
+      <span class="grow"></span>
+      <button id="btnInspClose" class="icon-only phone-only" aria-label="Close">✕</button>
     </div>
-    <div id="drawerBody"></div>
+    <div id="inspBody"></div>
   </aside>
 
+  <div id="scrim" hidden></div>
   <div id="signin" class="overlay" hidden>
     <div class="card">
       <h2>Sign in</h2>
@@ -133,7 +81,7 @@
     </div>
   </div>
   <div id="toast" hidden></div>
-  <button id="toggleSidebar" aria-label="Toggle panel">☰</button>
+  <button id="btnInspOpen" class="phone-only fab" aria-label="Details">ⓘ</button>
 </div>
 <script type="module" src="main.js"></script>
 </body>

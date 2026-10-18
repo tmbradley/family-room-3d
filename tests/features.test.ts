@@ -365,7 +365,13 @@ test('mirror fix: older (frame 1) scans convert exactly; Michael-only, rollback-
   const j = await upload(re, 'scan', 'roomplan_json', new TextEncoder().encode('{}'));
   const s2 = ok(await http('POST', '/api/scans/import', { token: re, uploadId: j, roomplanData: buildCapturedRoom(SAMPLE) }, 'none'), 201);
   assert.equal((await http('POST', `/api/scans/${s2.id}/promote`)).json.error, 'mirrored_room');
+  // This scan was already furnished: furnishing again opens that design instead of making another.
+  const again = await http('POST', `/api/scans/${scanId}/furnish`, {});
+  assert.equal(again.status, 200); assert.equal(again.json.existing, true);
+  // A new furnish of the mirrored room waits for the fix (archive the made design so it would create one).
+  await prisma.workspace.update({ where: { id: again.json.workspaceId }, data: { archivedAt: new Date() } });
   assert.equal((await http('POST', `/api/scans/${scanId}/furnish`, {})).json.error, 'mirrored_room');
+  await prisma.workspace.update({ where: { id: again.json.workspaceId }, data: { archivedAt: null } });
   assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`, {}, 'agent')).status, 403);
   assert.equal((await http('POST', `/api/rooms/${curRoom}/fix-mirror`)).json.error, 'has_furniture'); // the furnished workspace
   const placed = await prisma.placement.findMany({ where: { roomId: curRoom } });

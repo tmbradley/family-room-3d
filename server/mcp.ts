@@ -42,7 +42,7 @@ function buildServer(scope: Scope, agentKeyId: number) {
   };
   const ro = { readOnlyHint: true, openWorldHint: false };
 
-  server.registerTool('list_workspaces', { title: 'List workspaces', description: 'All design workspaces with revision, room/placement counts and pending proposals.', annotations: ro },
+  server.registerTool('list_workspaces', { title: 'List workspaces', description: 'All design workspaces (designs) with revision, rooms, placement counts, pending proposals, where each came from (origin), and archivedAt. Archived designs are read-only: propose to a live design or Current. Design names are unique per room; a newWorkspace proposal whose name is taken gets " 2", " 3" added when approved.', annotations: ro },
     () => guard(() => listWorkspaces(prisma)));
   server.registerTool('get_workspace', {
     title: 'Get workspace', description: 'One workspace in full: rooms, walls, openings, fixtures, furniture placements and items, with measurement sources and pins.',

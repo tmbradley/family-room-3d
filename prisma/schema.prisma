@@ -297,19 +297,19 @@ model RoomLink {
 // Every value ever recorded for a measurable field. Never deleted.
 // Effective value: newest override > newest of scan/measured > manual_estimate.
 model Measurement {
-  id         Int               @id @default(autoincrement())
-  entityType String            @map("entity_type") @db.VarChar(40)
-  entityId   Int               @map("entity_id")
-  field      String            @db.VarChar(60)
-  valueIn    Int               @map("value_in")
-  source     MeasurementSource
-  isOverride Boolean           @default(false) @map("is_override")
-  uploadId   Int?              @map("upload_id")
-  recordedBy Actor             @map("recorded_by")
-  recordedAt DateTime          @default(now()) @map("recorded_at")
-  note       String?           @db.VarChar(500)
-  unpinnedAt DateTime?         @map("unpinned_at") // set when a pin (source=manual, isOverride) is released
-  withdrawnAt DateTime?        @map("withdrawn_at") // undone in the editor: kept for the record, no longer counts
+  id          Int               @id @default(autoincrement())
+  entityType  String            @map("entity_type") @db.VarChar(40)
+  entityId    Int               @map("entity_id")
+  field       String            @db.VarChar(60)
+  valueIn     Int               @map("value_in")
+  source      MeasurementSource
+  isOverride  Boolean           @default(false) @map("is_override")
+  uploadId    Int?              @map("upload_id")
+  recordedBy  Actor             @map("recorded_by")
+  recordedAt  DateTime          @default(now()) @map("recorded_at")
+  note        String?           @db.VarChar(500)
+  unpinnedAt  DateTime?         @map("unpinned_at") // set when a pin (source=manual, isOverride) is released
+  withdrawnAt DateTime?         @map("withdrawn_at") // undone in the editor: kept for the record, no longer counts
 
   upload Upload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
 
@@ -320,18 +320,21 @@ model Measurement {
 // ---------- Design workspaces ----------
 
 model Workspace {
-  id               Int      @id @default(autoincrement())
-  houseId          Int      @map("house_id")
-  name             String   @db.VarChar(120)
-  notes            String?  @db.Text
-  baseRevision     Int?     @map("base_revision") // Current revision it was reconciled with; NULL = not based on Current
-  revision         Int      @default(0)
-  createdBy        Actor    @map("created_by")
-  sourceProposalId Int?     @unique @map("source_proposal_id")
-  createdAt        DateTime @default(now()) @map("created_at")
+  id               Int       @id @default(autoincrement())
+  houseId          Int       @map("house_id")
+  name             String    @db.VarChar(120)
+  notes            String?   @db.Text
+  baseRevision     Int?      @map("base_revision") // Current revision it was reconciled with; NULL = not based on Current
+  revision         Int       @default(0)
+  createdBy        Actor     @map("created_by")
+  sourceProposalId Int?      @unique @map("source_proposal_id")
+  sourceScanId     Int?      @map("source_scan_id") // made by "Start a design from this scan"
+  archivedAt       DateTime? @map("archived_at") // archived designs are hidden and read-only until restored
+  createdAt        DateTime  @default(now()) @map("created_at")
 
   house              House                @relation(fields: [houseId], references: [id], onDelete: Cascade)
   sourceProposal     Proposal?            @relation("createdFrom", fields: [sourceProposalId], references: [id], onDelete: SetNull)
+  sourceScan         ScanImport?          @relation("designsFromScan", fields: [sourceScanId], references: [id], onDelete: SetNull)
   rooms              WorkspaceRoom[]
   styles             WorkspaceRoomStyle[]
   structureOverrides StructureOverride[]
@@ -860,12 +863,13 @@ model ScanImport {
   promotedBy Actor?           @map("promoted_by")
   createdAt  DateTime         @default(now()) @map("created_at")
 
-  house  House            @relation(fields: [houseId], references: [id], onDelete: Cascade)
-  room   Room?            @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  upload Upload           @relation("primaryUpload", fields: [uploadId], references: [id], onDelete: Cascade)
-  data   ScanImportData[]
-  files  Upload[]         @relation("scanFiles")
-  photos ScanPhoto[]
+  house   House            @relation(fields: [houseId], references: [id], onDelete: Cascade)
+  room    Room?            @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  upload  Upload           @relation("primaryUpload", fields: [uploadId], references: [id], onDelete: Cascade)
+  data    ScanImportData[]
+  files   Upload[]         @relation("scanFiles")
+  photos  ScanPhoto[]
+  designs Workspace[]      @relation("designsFromScan")
 
   @@index([houseId])
   @@index([status])

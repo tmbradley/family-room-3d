@@ -723,6 +723,21 @@ link (AASA `applinks`) that opens the app. Details: `SCAN_SETUP.md` (server) and
 
 ---
 
+### P9: Navigation redesign **[Oct 17, 2026]**
+
+Approved by Michael (plan: nav-redesign.md, mockup states design / proposal / compare / new design / save / history).
+- Layout: top bar with breadcrumb, Scan room, Inbox and account menu; sidebar with Current rooms and designs grouped
+  by room (origin line, ⋯ menu, archived section); toolbar; canvas with banner, legend, compare bar and view controls;
+  details panel on the right with Details / Proposals / History. Phone: slide-over sidebar, bottom-sheet panel.
+  The editor keeps its default view. Old `?ws=`, `split=`, `drawer=` links still work.
+- Approve shows an Undo toast (10 minutes, only while it is the latest change; a new design is archived, other
+  approvals roll back one revision, and the proposal goes back to pending). Rollback from History still works.
+- Save to Current: the summary dialog is the approval. Confirming files the proposal and approves it at once;
+  it can be rolled back from History. Agents still file pending proposals.
+- Design names are unique per room (case-insensitive, archived designs excluded); the server refuses duplicates
+  and suggests "Name 2". Furnish from scan opens the design it already made (`workspaces.source_scan_id`).
+- Archive (`workspaces.archived_at`, migration 0007): hidden, read-only, restorable; refused while proposals are pending.
+
 ## 12. Open questions for Michael
 
 Answered and folded in: storage (Railway + MySQL, fully relational), furniture (MySQL only),

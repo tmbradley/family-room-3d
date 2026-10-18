@@ -7,6 +7,7 @@ import type { Actor, RevisionKind } from '@prisma/client';
 import { ApiError } from './util.js';
 import { checkParam } from './templates.js';
 import { coerce, def, delegate, fieldSpec, ownerOf, ser, workspaceRoomIds, type Tx } from './entities.js';
+import { assertNameFree, assertNotArchived, clean, roomKeysOf } from './designs.js';
 
 export type Op =
   | { op: 'create'; entityType: string; tempRef?: string; fields: Record<string, unknown>; id?: number }
@@ -76,6 +77,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   if (W === null && !(ctx.mode === 'rollback' || (ctx.mode === 'rescan' && ctx.trusted) || ctx.mode === 'measurement' || ctx.mode === 'proposal'))
     throw new ApiError(403, 'current_locked', 'Current only changes through a promoted scan, a measurement, an approved proposal, or a rollback');
   const scopeName = W === null ? 'Current' : `workspace ${W}`;
+  if (W !== null) await assertNotArchived(tx, W); // archived designs are read-only
   let roomIds: Set<number> | null = null;
   const rooms = async () => (roomIds ??= W === null ? await currentRoomIds(tx) : await workspaceRoomIds(tx, W));
 
@@ -201,6 +203,13 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       if (op.entityType === 'placement_param' && (op.field === 'placementId' || op.field === 'key')) throw new ApiError(400, 'unknown_field', `placement_param.${op.field} can't change; delete and create instead`);
       if (op.field in { roomId: 1, wallId: 1, itemId: 1, replacesPlacementId: 1, templateId: 1, modelId: 1 }) await checkRefs(op.entityType, { ...row, [op.field]: val });
       let stored = val;
+      if (op.entityType === 'workspace' && op.field === 'name') {
+        // Design names are unique per room (live designs, case-insensitive).
+        stored = clean(String(val ?? ''));
+        const { keys, labels } = await roomKeysOf(tx, id);
+        await assertNameFree(tx, row.houseId, stored as string, keys, labels, id);
+        if (ser(row.name) === ser(stored)) continue;
+      }
       if (op.entityType === 'placement_param' && op.field === 'value') {
         stored = await checkTemplateParam(row.placementId, row.key, val);
         if (ser(row.value) === ser(stored)) continue;
