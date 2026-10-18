@@ -18,8 +18,14 @@ export type RevChange = {
 };
 
 export type ApplyCtx = {
+  /** The workspace being changed, or null for Current (only rescans and their rollbacks). */
   workspaceId: number | null;
-  mode: 'save' | 'proposal' | 'rollback' | 'measurement';
+  mode: 'save' | 'proposal' | 'rollback' | 'measurement' | 'rescan';
+  /**
+   * Internal callers only (scan promotion): may set system fields and create Current rooms.
+   * Never set from request input.
+   */
+  trusted?: boolean;
   /** For "new workspace" proposals: ids in the base workspace -> ids in the copy. */
   idMap?: Map<string, number>;
   /** Refuse to apply an update whose stored `before` no longer matches (proposals). */
@@ -36,28 +42,27 @@ export async function isPinned(tx: Tx, entityType: string, entityId: number, fie
   return !!pin;
 }
 
-export async function lockWorkspace(tx: Tx, workspaceId: number | null) {
-  if (workspaceId === null) return null;
+export async function lockWorkspace(tx: Tx, workspaceId: number) {
   await tx.$queryRaw`SELECT id FROM workspaces WHERE id = ${workspaceId} FOR UPDATE`;
   const ws = await tx.workspace.findUnique({ where: { id: workspaceId } });
   if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
   return ws;
 }
 
-const mapId = (ctx: ApplyCtx, type: string, id: number) => {
-  if (ctx.workspaceId === null) return id;
-  return ctx.idMap?.get(`${type}:${id}`) ?? id;
-};
+const mapId = (ctx: ApplyCtx, type: string, id: number) => ctx.idMap?.get(`${type}:${id}`) ?? id;
 
 export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   const changes: RevChange[] = [];
   const skipped: string[] = [];
   const refs: Record<string, number> = {};
   const W = ctx.workspaceId;
-  const allowSystem = ctx.mode === 'rollback';
+  const allowSystem = ctx.mode === 'rollback' || ctx.trusted === true;
+  if (W === null && !(ctx.mode === 'rollback' || (ctx.mode === 'rescan' && ctx.trusted) || ctx.mode === 'measurement'))
+    throw new ApiError(403, 'current_locked', 'Current only changes through a promoted scan, a measurement, or a rollback');
+  const scopeName = W === null ? 'Current' : `workspace ${W}`;
   let roomIds: Set<number> | null = null;
   const rooms = async () => {
-    if (W === null || W === -1) return new Set<number>();
+    if (W === null) throw new ApiError(403, 'current_locked', 'Current holds structure only; furniture lives in workspaces');
     return (roomIds ??= await workspaceRoomIds(tx, W));
   };
 
@@ -74,10 +79,9 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   };
 
   const checkOwner = async (type: string, row: any) => {
-    if (W === null || W === -1) return;
     const owner = await ownerOf(tx, type, row);
     if (owner === 'global' || owner === W) return;
-    throw new ApiError(403, 'not_in_workspace', `${type} ${row.id ?? ''} isn't part of workspace ${W}${owner === null ? ' (it belongs to Current)' : ''}`);
+    throw new ApiError(403, 'not_in_workspace', `${type} ${row.id ?? ''} isn't part of ${scopeName}${owner === null ? ' (it belongs to Current)' : ''}`);
   };
 
   const checkRefs = async (type: string, data: Record<string, any>) => {
@@ -85,7 +89,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       const room = await tx.room.findUnique({ where: { id: data.roomId } });
       if (!room) throw new ApiError(400, 'invalid_ref', `room ${data.roomId} not found`);
       if (type === 'placement' ? !(await rooms()).has(room.id) : room.draftWorkspaceId !== W)
-        throw new ApiError(403, 'not_in_workspace', `room ${room.id} isn't ${type === 'placement' ? 'in' : 'a draft room of'} workspace ${W}`);
+        throw new ApiError(403, 'not_in_workspace', `room ${room.id} isn't ${type === 'placement' ? 'in' : 'a room of'} ${scopeName}`);
     }
     if (type === 'placement' && data.itemId != null && !(await tx.furnitureItem.findUnique({ where: { id: data.itemId } })))
       throw new ApiError(400, 'invalid_ref', `furniture_item ${data.itemId} not found`);
@@ -93,7 +97,7 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       throw new ApiError(400, 'invalid_ref', `placement ${data.replacesPlacementId} not found`);
     if ('wallId' in data && data.wallId != null) {
       const wall = await tx.wall.findUnique({ where: { id: data.wallId }, include: { room: true } });
-      if (!wall || wall.room.draftWorkspaceId !== W) throw new ApiError(403, 'not_in_workspace', `wall ${data.wallId} isn't in workspace ${W}`);
+      if (!wall || wall.room.draftWorkspaceId !== W) throw new ApiError(403, 'not_in_workspace', `wall ${data.wallId} isn't in ${scopeName}`);
     }
   };
 
@@ -107,24 +111,23 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
     const d = def(op.entityType);
     const model = delegate(tx, op.entityType);
 
+    if ((op.entityType === 'placement' || op.entityType === 'workspace') && W === null)
+      throw new ApiError(403, 'current_locked', 'Current holds structure only; furniture lives in workspaces');
+
     if (op.op === 'create') {
-      if (!d.create) throw new ApiError(400, 'not_creatable', `${op.entityType} can't be created by a change`);
+      // Current rooms are created only by a trusted scan promotion (or re-created by a rollback).
+      const currentRoom = op.entityType === 'room' && W === null && allowSystem;
+      if (!d.create && !currentRoom) throw new ApiError(400, 'not_creatable', `${op.entityType} can't be created by a change`);
       const data: Record<string, any> = {};
-      for (const [k, v] of Object.entries(op.fields ?? {})) {
-        const spec = fieldSpec(op.entityType, k, true);
-        if (spec && (spec as any).system && W === null && !allowSystem) {
-          data[k] = v;
-        } else {
-          data[k] = resolve(op.entityType, k, v);
-        }
-      }
+      for (const [k, v] of Object.entries(op.fields ?? {})) data[k] = resolve(op.entityType, k, v);
       if (!allowSystem) {
         const missing = d.required.filter((k) => data[k] === undefined);
         if (missing.length) throw new ApiError(400, 'missing_fields', `${op.entityType} create needs ${missing.join(', ')}`);
       }
       if (op.entityType === 'placement' && !allowSystem) data.workspaceId = W;
+      if (currentRoom) data.draftWorkspaceId = null;
       await checkRefs(op.entityType, data);
-      if (op.entityType === 'placement' && !allowSystem && W !== null && W > 0 && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
+      if (op.entityType === 'placement' && data.workspaceId !== W) throw new ApiError(403, 'not_in_workspace', 'placement must be in this workspace');
       if (op.id != null) data.id = op.id;
       const row = await model.create({ data });
       if (op.tempRef) refs[op.tempRef] = row.id;
@@ -160,6 +163,10 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
       // Rolling back past the creation of a catalog item removes it again, unless something still uses it.
       if (ctx.mode === 'rollback' && op.entityType === 'furniture_item') {
         if (await tx.placement.count({ where: { itemId: id } })) { skipped.push(`furniture_item ${id} (still used)`); continue; }
+      } else if (ctx.mode === 'rollback' && op.entityType === 'room' && W === null) {
+        // Rolling back the scan that created a Current room removes it again, once its walls are gone.
+        const [w, f] = await Promise.all([tx.wall.count({ where: { roomId: id } }), tx.fixture.count({ where: { roomId: id } })]);
+        if (w || f) { skipped.push(`room ${id} (still has walls or fixtures)`); continue; }
       } else throw new ApiError(400, 'not_deletable', `${op.entityType} can't be deleted by a change`);
     }
     if (op.entityType === 'wall') {
@@ -176,26 +183,31 @@ export async function applyOps(tx: Tx, ops: Op[], ctx: ApplyCtx) {
   return { changes, skipped, refs };
 }
 
+/** Lock the house row; Current's revision counter lives on it. */
+export async function lockHouse(tx: Tx, houseId: number) {
+  await tx.$queryRaw`SELECT id FROM houses WHERE id = ${houseId} FOR UPDATE`;
+  const house = await tx.house.findUnique({ where: { id: houseId } });
+  if (!house) throw new ApiError(404, 'house_not_found', `House ${houseId} not found`);
+  return house;
+}
+
+/**
+ * Record a revision. Revision numbers are always assigned here, from the workspace's counter or,
+ * for Current (workspaceId null), from houses.current_revision under a row lock.
+ */
 export async function commitRevision(
   tx: Tx,
-  p: { workspaceId: number | null; houseId?: number; kind: RevisionKind; actor: Actor; agentKeyId?: number | null; proposalId?: number | null; note?: string | null; rollsBackRevisionId?: number | null; changes: RevChange[]; baseRevision?: number },
+  p: { workspaceId: number | null; houseId?: number; kind: RevisionKind; actor: Actor; agentKeyId?: number | null; proposalId?: number | null; note?: string | null; rollsBackRevisionId?: number | null; changes: RevChange[] },
 ) {
-  let houseId: number;
-  let number: number;
-  let scope: string;
-
-  if (p.workspaceId !== null) {
-    const ws = await tx.workspace.findUniqueOrThrow({ where: { id: p.workspaceId } });
-    houseId = ws.houseId;
-    number = ws.revision + 1;
-    scope = `workspace:${ws.id}`;
+  let houseId: number, number: number, scope: string;
+  if (p.workspaceId === null) {
+    if (p.houseId == null) throw new ApiError(500, 'internal', 'Current revision needs a house');
+    const house = await lockHouse(tx, p.houseId);
+    houseId = house.id; number = (house.currentRevision ?? 0) + 1; scope = 'current';
   } else {
-    if (!p.houseId) throw new ApiError(400, 'invalid_request', 'houseId required for Current revisions');
-    houseId = p.houseId;
-    number = (p.baseRevision ?? 0) + 1;
-    scope = 'house';
+    const ws = await tx.workspace.findUniqueOrThrow({ where: { id: p.workspaceId } });
+    houseId = ws.houseId; number = ws.revision + 1; scope = `workspace:${ws.id}`;
   }
-
   const rev = await tx.revision.create({
     data: {
       houseId, workspaceId: p.workspaceId, scope, number, actor: p.actor, kind: p.kind,
@@ -204,69 +216,20 @@ export async function commitRevision(
     },
   });
   if (p.changes.length) await tx.revisionChange.createMany({ data: p.changes.map((c, seq) => ({ ...c, seq, revisionId: rev.id, field: c.field ?? null })) });
-  
-  if (p.workspaceId !== null) {
-    await tx.workspace.update({ where: { id: p.workspaceId }, data: { revision: number } });
-  }
-  
+  if (p.workspaceId === null) await tx.house.update({ where: { id: houseId }, data: { currentRevision: number } });
+  else await tx.workspace.update({ where: { id: p.workspaceId }, data: { revision: number } });
   return rev;
 }
 
 /** Michael's own edit from the editor: applied directly, recorded as a "save" revision. */
-export async function saveChanges(
-  tx: Tx,
-  workspaceId: number | null,
-  baseRevision: number,
-  ops: Op[],
-  note?: string,
-  params?: { houseId?: number; isCurrent?: boolean }
-) {
+export async function saveChanges(tx: Tx, workspaceId: number, baseRevision: number, ops: Op[], note?: string) {
   const ws = await lockWorkspace(tx, workspaceId);
-  
-  if (workspaceId !== null && ws) {
-    if (ws.revision !== baseRevision)
-      throw new ApiError(409, 'conflict', `Workspace is at revision ${ws.revision}, your edit was based on ${baseRevision}. Reload to get the latest.`, { revision: ws.revision });
-  }
-
-  const effectiveWorkspaceId = workspaceId === null ? null : workspaceId;
-  const { changes, refs } = await applyOps(tx, ops, { workspaceId: effectiveWorkspaceId, mode: 'save' });
-  if (!changes.length && workspaceId && ws) return { revision: ws.revision, refs, unchanged: true };
-
-  const rev = await commitRevision(tx, {
-    workspaceId,
-    houseId: params?.houseId ?? (ws?.houseId ?? undefined),
-    kind: 'save',
-    actor: params?.isCurrent ? 'system' : 'michael',
-    note: note ?? 'Edit in the editor',
-    changes,
-    baseRevision,
-  });
-
-  return { revision: rev, refs, roomId: refs['room-1'], unchanged: false };
-}
-
-export async function saveChangesForRescan(
-  tx: Tx,
-  workspaceId: number | null,
-  baseRevision: number,
-  ops: Op[],
-  note?: string,
-  params?: { houseId?: number }
-) {
-  const effectiveWorkspaceId = workspaceId === null ? null : workspaceId;
-  const { changes, refs } = await applyOps(tx, ops, { workspaceId: effectiveWorkspaceId, mode: 'save' });
-
-  const rev = await commitRevision(tx, {
-    workspaceId,
-    houseId: params?.houseId,
-    kind: 'rescan',
-    actor: 'system',
-    note: note ?? 'Scan promotion',
-    changes,
-    baseRevision,
-  });
-
-  return { revision: rev, refs, roomId: refs['room-1'], unchanged: false };
+  if (ws.revision !== baseRevision)
+    throw new ApiError(409, 'conflict', `Workspace is at revision ${ws.revision}, your edit was based on ${baseRevision}. Reload to get the latest.`, { revision: ws.revision });
+  const { changes, refs } = await applyOps(tx, ops, { workspaceId, mode: 'save' });
+  if (!changes.length) return { revision: ws.revision, refs, unchanged: true };
+  const rev = await commitRevision(tx, { workspaceId, kind: 'save', actor: 'michael', note: note ?? 'Edit in the editor', changes });
+  return { revision: rev.number, refs, unchanged: false };
 }
 
 /** Inverse ops for one revision's change rows (newest first). */
@@ -299,27 +262,39 @@ export function inverseOps(rows: { seq: number; op: string; entityType: string; 
 /** Roll a workspace back to the state right after revision `toRevision`. The rollback is itself a new revision. */
 export async function rollbackWorkspace(tx: Tx, workspaceId: number, toRevision: number, note?: string) {
   const ws = await lockWorkspace(tx, workspaceId);
-  if (!ws) throw new ApiError(404, 'workspace_not_found', `Workspace ${workspaceId} not found`);
-  if (!Number.isInteger(toRevision) || toRevision < 0 || toRevision >= ws.revision)
-    throw new ApiError(400, 'invalid_revision', `Pick a revision between 0 and ${ws.revision - 1}`);
-  const later = await tx.revision.findMany({
-    where: { workspaceId, number: { gt: toRevision } }, orderBy: { number: 'desc' }, include: { changes: true },
-  });
+  return rollbackScope(tx, { workspaceId, houseId: ws.houseId, current: ws.revision, floor: 0 }, toRevision, note);
+}
+
+/**
+ * Roll Current back to the state right after Current revision `toRevision` (>= 1: Current starts at
+ * its first promoted scan). Same inverse-ops path as workspaces; pinned fields are kept.
+ */
+export async function rollbackCurrent(tx: Tx, houseId: number, toRevision: number, note?: string) {
+  const house = await lockHouse(tx, houseId);
+  if (house.currentRevision == null) throw new ApiError(409, 'no_current', 'There is no Current yet');
+  return rollbackScope(tx, { workspaceId: null, houseId, current: house.currentRevision, floor: 1 }, toRevision, note);
+}
+
+async function rollbackScope(tx: Tx, s: { workspaceId: number | null; houseId: number; current: number; floor: number }, toRevision: number, note?: string) {
+  if (!Number.isInteger(toRevision) || toRevision < s.floor || toRevision >= s.current)
+    throw new ApiError(400, 'invalid_revision', s.current - 1 < s.floor ? 'Nothing to roll back to yet' : `Pick a revision between ${s.floor} and ${s.current - 1}`);
+  const where = s.workspaceId === null ? { houseId: s.houseId, scope: 'current' } : { workspaceId: s.workspaceId };
+  const later = await tx.revision.findMany({ where: { ...where, number: { gt: toRevision } }, orderBy: { number: 'desc' }, include: { changes: true } });
   const base = later.find((r) => r.kind === 'seed' || r.kind === 'copy');
-  if (base) throw new ApiError(409, 'before_start', `Can't roll back past revision ${base.number} (${base.kind}), where this workspace started`);
+  if (base) throw new ApiError(409, 'before_start', `Can't roll back past revision ${base.number} (${base.kind}), where this ${s.workspaceId === null ? 'Current' : 'workspace'} started`);
   const ops = later.flatMap((r) => inverseOps(r.changes));
-  const { changes, skipped } = await applyOps(tx, ops, { workspaceId, mode: 'rollback' });
-  const target = toRevision > 0 ? await tx.revision.findFirst({ where: { workspaceId, number: toRevision } }) : null;
+  const { changes, skipped } = await applyOps(tx, ops, { workspaceId: s.workspaceId, mode: 'rollback' });
+  const target = await tx.revision.findFirst({ where: { ...where, number: toRevision } });
   const rev = await commitRevision(tx, {
-    workspaceId, kind: 'rollback', actor: 'michael', rollsBackRevisionId: target?.id ?? null, changes,
+    workspaceId: s.workspaceId, houseId: s.houseId, kind: 'rollback', actor: 'michael', rollsBackRevisionId: target?.id ?? null, changes,
     note: [note || `Rolled back to revision ${toRevision}`, skipped.length ? `Kept pinned: ${skipped.join('; ')}` : ''].filter(Boolean).join('. '),
   });
   return { revision: rev.number, skipped };
 }
 
-export async function getHistory(tx: Tx, workspaceId: number, limit = 50) {
+export async function getHistory(tx: Tx, workspaceId: number | { currentOf: number }, limit = 50) {
   const revs = await tx.revision.findMany({
-    where: { workspaceId }, orderBy: { number: 'desc' }, take: Math.min(Math.max(limit, 1), 200),
+    where: typeof workspaceId === 'number' ? { workspaceId } : { houseId: workspaceId.currentOf, scope: 'current' }, orderBy: { number: 'desc' }, take: Math.min(Math.max(limit, 1), 200),
     include: { changes: { orderBy: { seq: 'asc' } }, proposal: { select: { id: true, title: true } }, agentKey: { select: { name: true } } },
   });
   return revs.map((r) => ({

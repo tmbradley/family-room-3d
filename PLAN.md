@@ -659,22 +659,29 @@ the measured widths (3 ft walkway + 2.5 ft), and a workspace can span both rooms
 12 × 13 ft with the fireplace and window in the right places, you can fix any errors with P3 tools,
 and a pinned manual value survives the import.
 
-### P7: iOS App Clip scanner (phone-first) **[IN PROGRESS - Oct 17, 2026]**
+### P7: iOS App Clip scanner (phone-first) **[server live, iOS not yet built - Oct 17, 2026]**
 
-Building end-to-end room scanning: pairing, upload, import, review, and promote to Current.
+Pairing, upload, import, review, and promote to Current, end to end. Details: `SCAN_SETUP.md`
+(server) and `ios/README.md` (Mac steps).
 
-- **Pairing system:** web app generates a short-lived token/QR code; App Clip exchanges it for an upload token
-- **Upload endpoints:** presigned S3 URLs for RoomPlan JSON, USDZ, and photos; stored in Railway bucket
-- **Parser:** converts CapturedRoom data (walls, openings, objects with dimensions) to relational model
-- **Scan imports:** reviewable in the editor with 3D preview; never auto-promoted to Current
-- **iOS App Clip:** RoomPlan capture with LiDAR, photo collection, uploads with retry/persistence
-- **Parent app:** minimal container required for App Clip (simple room viewer or welcome screen)
+- **Pairing:** "Pair phone" in the editor (Michael's session only) makes a one-scan code with a
+  QR code. The code is hashed, expires after 60 minutes, allows 12 files, and is bound to a
+  Current room or to a new room.
+- **Uploads:** presigned PUTs to the Railway bucket (RoomPlan JSON, USDZ, photos). Each upload is
+  bound to its code.
+- **Parser:** Apple's `CapturedRoom` Codable JSON (keyed-enum categories, `simd_float3`
+  dimensions, column-major transforms, `parentIdentifier`) converted to walls and openings.
+- **Review:** pending scans are drawn next to Current. Promote/Reject is Michael only and never
+  automatic. A rescan matches existing walls and openings, so ids and pins survive. Pins always
+  win, and every scan value is kept as a measurement. Current revisions can be rolled back.
+- **iOS:** parent app + App Clip in `ios/`. RoomPlan via `RoomCaptureView` and
+  `RoomCaptureViewDelegate`. Not compiled yet; Michael builds it in Xcode.
 - **Build path (Decided): Xcode on Michael's Mac only.** He builds, signs (Apple Developer account), and
   uploads to TestFlight from Xcode. We don't use Linux or cloud iOS builds (including GitHub Actions
   macOS runners, which are too expensive). The bot writes the Swift code into the repo, and Michael
   builds it.
 
-**Done when:** 
+**Done when:**
 - Michael generates a pairing code in the web app
 - Scans the room with the App Clip (RoomPlan + photos)
 - The scan uploads and appears as a reviewable import in the editor

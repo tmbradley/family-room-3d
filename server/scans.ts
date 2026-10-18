@@ -1,644 +1,452 @@
+/**
+ * Room scans from the App Clip.
+ *
+ *  1. parseCapturedRoom(): Apple RoomPlan `CapturedRoom` (JSONEncoder output) -> plan in whole inches.
+ *  2. createScanImport(): stores the parsed scan relationally (scan_import_data) for review. Nothing
+ *     in the design changes.
+ *  3. promoteScanImport(): Michael-only. Applies the scan to Current as ONE revision through the
+ *     change engine (revision_changes rows, so it can be rolled back), matching scanned walls and
+ *     openings to existing ones so ids and pins survive. Every scanned value is recorded as a
+ *     measurement row (source "scan"); pinned values always win and are never overwritten.
+ *
+ * RoomPlan format (CapturedRoom is Codable): walls/doors/windows/openings are Surfaces and
+ * objects are Objects, each with
+ *   - category: keyed enum, e.g. {"wall":{}}, {"door":{"isOpen":false}}, {"sofa":{}}
+ *   - dimensions: simd_float3 [x, y, z] in meters. Surfaces: [width/length, height, 0].
+ *     Objects: [width, height, depth]. Height is always index 1 (y is up).
+ *   - transform: simd_float4x4, 16 floats, column-major. Column 0 = local x axis, column 3 = position.
+ *   - parentIdentifier (iOS 17+): the wall a door/window/opening sits in.
+ */
+import { z } from 'zod';
 import { prisma } from './db.js';
 import { ApiError } from './util.js';
-import type { Prisma } from '@prisma/client';
-import { saveChanges, saveChangesForRescan, type Op } from './changes.js';
+import { applyOps, commitRevision, isPinned, lockHouse, type Op } from './changes.js';
+import type { Tx } from './entities.js';
+
+// ---------------------------------------------------------------------------
+// Input validation (only the parts we use; everything else is passed through and ignored)
+// ---------------------------------------------------------------------------
+const num = z.number().finite();
+const surface = z.object({
+  identifier: z.string().min(1).max(100),
+  parentIdentifier: z.string().max(100).nullable().optional(),
+  category: z.union([z.string(), z.record(z.string(), z.any())]),
+  dimensions: z.array(num).length(3),
+  transform: z.array(num).length(16),
+}).passthrough();
+const object = surface;
+export const capturedRoomSchema = z.object({
+  walls: z.array(surface).min(1).max(300),
+  doors: z.array(surface).max(300).default([]),
+  windows: z.array(surface).max(300).default([]),
+  openings: z.array(surface).max(300).default([]),
+  floors: z.array(surface).max(50).optional(),
+  objects: z.array(object).max(1000).default([]),
+}).passthrough();
+export type CapturedRoom = z.input<typeof capturedRoomSchema>;
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+const M_TO_IN = 39.37007874;
+const toIn = (m: number) => Math.round(m * M_TO_IN);
+const categoryOf = (c: unknown) => (typeof c === 'string' ? c : c && typeof c === 'object' ? Object.keys(c)[0] ?? 'unknown' : 'unknown');
+
+export type ParsedWall = { key: string; startXIn: number; startYIn: number; endXIn: number; endYIn: number; heightIn: number; lengthIn: number };
+export type ParsedOpening = { key: string; wallKey: string; type: 'window' | 'door' | 'open_span'; offsetIn: number; widthIn: number; sillIn: number; headIn: number };
+export type ParsedObject = { key: string; kind: string; xIn: number; yIn: number; rotationDeg: number; widthIn: number; depthIn: number; heightIn: number };
+export type ParsedScan = {
+  widthIn: number; depthIn: number; ceilingIn: number;
+  /** How far the scan was rotated (degrees) so its walls line up with the plan axes. */
+  alignedByDeg: number;
+  walls: ParsedWall[]; openings: ParsedOpening[]; objects: ParsedObject[];
+};
+
+type P = { x: number; y: number };
 
 /**
- * Apple RoomPlan CapturedRoom structure (real format from JSONEncoder)
+ * Plan coordinates: x = world X, y = world Z (looking down from above), in inches, rotated so the
+ * dominant wall direction lines up with the x axis and shifted so the walls start at (0, 0).
  */
-export interface CapturedRoom {
-  dimensions: number[]; // [width, length, height] in meters (simd_float3)
-  walls: Array<{
-    identifier: string;
-    category: string;
-    dimensions: number[]; // [width, length, height]
-    transform: number[]; // 4x4 column-major matrix
-    confidence: string;
-  }>;
-  doors: Array<{
-    identifier: string;
-    parentIdentifier: string;
-    category: string;
-    dimensions: number[]; // [width, height]
-    transform: number[];
-    confidence: string;
-  }>;
-  windows: Array<{
-    identifier: string;
-    parentIdentifier: string;
-    category: string;
-    dimensions: number[]; // [width, height]
-    transform: number[];
-    confidence: string;
-  }>;
-  openings: Array<{
-    identifier: string;
-    parentIdentifier: string;
-    category: string;
-    dimensions: number[]; // [width, height]
-    transform: number[];
-    confidence: string;
-  }>;
-  objects: Array<{
-    identifier: string;
-    category: string;
-    dimensions: number[]; // [width, length, height]
-    transform: number[];
-    confidence: string;
-  }>;
-}
+export function parseCapturedRoom(input: unknown): ParsedScan {
+  const parsed = capturedRoomSchema.safeParse(input);
+  if (!parsed.success) throw new ApiError(400, 'invalid_scan', `Not a RoomPlan CapturedRoom: ${parsed.error.issues.slice(0, 3).map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  const room = parsed.data;
 
-interface ParsedRoom {
-  label: string;
-  widthIn: number;
-  depthIn: number;
-  ceilingIn: number;
-  walls: Array<{
-    index: number;
-    identifier: string;
-    startXIn: number;
-    startYIn: number;
-    endXIn: number;
-    endYIn: number;
-    heightIn: number;
-    thicknessIn: number;
-  }>;
-  openings: Array<{
-    index: number;
-    identifier: string;
-    wallIdentifier: string;
-    type: 'window' | 'door' | 'open_span';
-    offsetIn: number;
-    widthIn: number;
-    sillIn: number;
-    headIn: number;
-  }>;
-  objects: Array<{
-    index: number;
-    kind: string;
-    xIn: number;
-    yIn: number;
-    rotationDeg: number;
-    widthIn: number;
-    depthIn: number;
-    heightIn: number;
-  }>;
-}
-
-function metersToInches(meters: number): number {
-  return Math.round(meters * 39.3701);
-}
-
-function extractPosition(transform: number[]): { x: number; y: number; z: number } {
-  return {
-    x: transform[12],
-    y: transform[13],
-    z: transform[14],
-  };
-}
-
-function extractRotationYaw(transform: number[]): number {
-  const m00 = transform[0];
-  const m02 = transform[8];
-  const yaw = Math.atan2(m02, m00);
-  return Math.round((yaw * 180) / Math.PI);
-}
-
-function calculateWallEndpoints(transform: number[], widthMeters: number) {
-  const pos = extractPosition(transform);
-  
-  const m00 = transform[0];
-  const m01 = transform[4];
-  const m02 = transform[8];
-  
-  const length = Math.sqrt(m00 * m00 + m01 * m01 + m02 * m02);
-  const dirX = length > 0 ? m00 / length : 1;
-  const dirZ = length > 0 ? m02 / length : 0;
-  
-  const halfWidth = widthMeters / 2;
-  
-  return {
-    startXIn: metersToInches(pos.x - dirX * halfWidth),
-    startYIn: metersToInches(pos.z - dirZ * halfWidth),
-    endXIn: metersToInches(pos.x + dirX * halfWidth),
-    endYIn: metersToInches(pos.z + dirZ * halfWidth),
-  };
-}
-
-function calculateOffsetAlongWall(
-  openingPos: { x: number; z: number },
-  wallStart: { x: number; z: number },
-  wallEnd: { x: number; z: number }
-): number {
-  const wallDx = wallEnd.x - wallStart.x;
-  const wallDz = wallEnd.z - wallStart.z;
-  const wallLength = Math.sqrt(wallDx * wallDx + wallDz * wallDz);
-  
-  if (wallLength === 0) return 0;
-  
-  const openingDx = openingPos.x - wallStart.x;
-  const openingDz = openingPos.z - wallStart.z;
-  
-  const projection = (openingDx * wallDx + openingDz * wallDz) / (wallLength * wallLength);
-  const offset = projection * wallLength;
-  
-  return metersToInches(Math.max(0, Math.min(wallLength, offset)));
-}
-
-export function parseCapturedRoom(data: CapturedRoom, label?: string): ParsedRoom {
-  const widthIn = metersToInches(data.dimensions[0]);
-  const depthIn = metersToInches(data.dimensions[1]);
-  const ceilingIn = metersToInches(data.dimensions[2]);
-
-  const walls = data.walls.map((wall, index) => {
-    const widthMeters = wall.dimensions[0];
-    const heightMeters = wall.dimensions[2];
-    const endpoints = calculateWallEndpoints(wall.transform, widthMeters);
-    
-    return {
-      index,
-      identifier: wall.identifier,
-      startXIn: endpoints.startXIn,
-      startYIn: endpoints.startYIn,
-      endXIn: endpoints.endXIn,
-      endYIn: endpoints.endYIn,
-      heightIn: metersToInches(heightMeters),
-      thicknessIn: 5,
-    };
+  // Walls in world meters.
+  const rawWalls = room.walls.map((w) => {
+    const t = w.transform;
+    let dx = t[0], dz = t[2];
+    const n = Math.hypot(dx, dz) || 1; dx /= n; dz /= n;
+    const len = w.dimensions[0], h = w.dimensions[1];
+    const c = { x: t[12], y: t[14] };
+    return { key: w.identifier, a: { x: c.x - (dx * len) / 2, y: c.y - (dz * len) / 2 }, b: { x: c.x + (dx * len) / 2, y: c.y + (dz * len) / 2 }, len, h, cy: t[13] };
   });
 
-  const wallMap = new Map(walls.map(w => [w.identifier, w]));
+  // Dominant direction (walls are mostly at right angles): average of 4*angle, weighted by length.
+  let s = 0, co = 0;
+  for (const w of rawWalls) { const a = Math.atan2(w.b.y - w.a.y, w.b.x - w.a.x); s += Math.sin(4 * a) * w.len; co += Math.cos(4 * a) * w.len; }
+  const theta = Math.atan2(s, co) / 4;
+  const rot = (p: P): P => ({ x: p.x * Math.cos(theta) + p.y * Math.sin(theta), y: -p.x * Math.sin(theta) + p.y * Math.cos(theta) });
+  const rotated = rawWalls.map((w) => ({ ...w, a: rot(w.a), b: rot(w.b) }));
+  const minX = Math.min(...rotated.flatMap((w) => [w.a.x, w.b.x]));
+  const minY = Math.min(...rotated.flatMap((w) => [w.a.y, w.b.y]));
+  const plan = (p: P): P => { const r = rot(p); return { x: (r.x - minX) * M_TO_IN, y: (r.y - minY) * M_TO_IN }; };
+  const shift = (p: P): P => ({ x: (p.x - minX) * M_TO_IN, y: (p.y - minY) * M_TO_IN });
 
-  const allOpenings: Array<{
-    identifier: string;
-    parentIdentifier: string;
-    type: 'window' | 'door' | 'open_span';
-    dimensions: number[];
-    transform: number[];
-  }> = [
-    ...data.doors.map(d => ({ ...d, type: 'door' as const })),
-    ...data.windows.map(w => ({ ...w, type: 'window' as const })),
-    ...data.openings.map(o => ({ ...o, type: 'open_span' as const })),
+  // Floor height (world y): the floor surface if present, otherwise the lowest wall bottom.
+  const floorY = room.floors?.length ? Math.min(...room.floors.map((f) => f.transform[13])) : Math.min(...rawWalls.map((w) => w.cy - w.h / 2));
+  const ceilingIn = toIn(Math.max(...rawWalls.map((w) => w.cy + w.h / 2)) - floorY);
+
+  const walls: ParsedWall[] = rotated.map((w) => {
+    const a = shift(w.a), b = shift(w.b);
+    return { key: w.key, startXIn: Math.round(a.x), startYIn: Math.round(a.y), endXIn: Math.round(b.x), endYIn: Math.round(b.y), heightIn: toIn(w.h), lengthIn: toIn(w.len) };
+  });
+  const wallByKey = new Map(walls.map((w) => [w.key, w]));
+
+  const segDist = (p: P, w: ParsedWall) => {
+    const ax = w.startXIn, ay = w.startYIn, bx = w.endXIn, by = w.endYIn;
+    const L2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
+    const t = Math.max(0, Math.min(1, ((p.x - ax) * (bx - ax) + (p.y - ay) * (by - ay)) / L2));
+    return Math.hypot(p.x - (ax + t * (bx - ax)), p.y - (ay + t * (by - ay)));
+  };
+
+  const surfaces = [
+    ...room.doors.map((d) => ({ d, type: 'door' as const })),
+    ...room.windows.map((d) => ({ d, type: 'window' as const })),
+    ...room.openings.map((d) => ({ d, type: 'open_span' as const })),
   ];
+  const openings: ParsedOpening[] = [];
+  for (const { d, type } of surfaces) {
+    const t = d.transform;
+    const c = plan({ x: t[12], y: t[14] });
+    const wall = (d.parentIdentifier && wallByKey.get(d.parentIdentifier)) || [...walls].sort((p, q) => segDist(c, p) - segDist(c, q))[0];
+    const len = Math.hypot(wall.endXIn - wall.startXIn, wall.endYIn - wall.startYIn) || 1;
+    const along = ((c.x - wall.startXIn) * (wall.endXIn - wall.startXIn) + (c.y - wall.startYIn) * (wall.endYIn - wall.startYIn)) / len;
+    const widthIn = toIn(d.dimensions[0]), heightIn = toIn(d.dimensions[1]);
+    const offsetIn = Math.max(0, Math.min(Math.round(along - widthIn / 2), Math.max(0, Math.round(len) - widthIn)));
+    const bottom = type === 'window' ? Math.max(0, toIn(t[13] - d.dimensions[1] / 2 - floorY)) : 0;
+    openings.push({ key: d.identifier, wallKey: wall.key, type, offsetIn, widthIn, sillIn: bottom, headIn: bottom + heightIn });
+  }
 
-  const openings = allOpenings.map((opening, index) => {
-    const pos = extractPosition(opening.transform);
-    const parentWall = wallMap.get(opening.parentIdentifier);
-    
-    const widthIn = metersToInches(opening.dimensions[0]);
-    const heightIn = metersToInches(opening.dimensions[1]);
-    
-    let offsetIn = 0;
-    if (parentWall) {
-      const wallStartMeters = { x: parentWall.startXIn / 39.3701, z: parentWall.startYIn / 39.3701 };
-      const wallEndMeters = { x: parentWall.endXIn / 39.3701, z: parentWall.endYIn / 39.3701 };
-      offsetIn = calculateOffsetAlongWall({ x: pos.x, z: pos.z }, wallStartMeters, wallEndMeters);
-    }
-    
+  const objects: ParsedObject[] = room.objects.map((o) => {
+    const t = o.transform;
+    const c = plan({ x: t[12], y: t[14] });
+    const yaw = (Math.atan2(t[2], t[0]) - theta) * (180 / Math.PI);
     return {
-      index,
-      identifier: opening.identifier,
-      wallIdentifier: opening.parentIdentifier,
-      type: opening.type,
-      offsetIn,
-      widthIn,
-      sillIn: opening.type === 'window' ? 36 : 0,
-      headIn: opening.type === 'window' ? 36 + heightIn : heightIn,
+      key: o.identifier, kind: categoryOf(o.category), xIn: Math.round(c.x), yIn: Math.round(c.y),
+      rotationDeg: ((Math.round(yaw) % 360) + 360) % 360,
+      widthIn: toIn(o.dimensions[0]), heightIn: toIn(o.dimensions[1]), depthIn: toIn(o.dimensions[2]),
     };
   });
 
-  const objects = data.objects.map((obj, index) => {
-    const pos = extractPosition(obj.transform);
-    const rotation = extractRotationYaw(obj.transform);
-
-    return {
-      index,
-      kind: obj.category.toLowerCase(),
-      xIn: metersToInches(pos.x),
-      yIn: metersToInches(pos.z),
-      rotationDeg: rotation,
-      widthIn: metersToInches(obj.dimensions[0]),
-      depthIn: metersToInches(obj.dimensions[1]),
-      heightIn: metersToInches(obj.dimensions[2]),
-    };
-  });
-
+  const xs = walls.flatMap((w) => [w.startXIn, w.endXIn]), ys = walls.flatMap((w) => [w.startYIn, w.endYIn]);
   return {
-    label: label || 'Scanned Room',
-    widthIn,
-    depthIn,
-    ceilingIn,
-    walls,
-    openings,
-    objects,
+    widthIn: Math.max(...xs) - Math.min(...xs), depthIn: Math.max(...ys) - Math.min(...ys), ceilingIn,
+    alignedByDeg: Math.round((theta * 180) / Math.PI * 10) / 10,
+    walls, openings, objects,
   };
 }
 
-export async function createScanImport(params: {
-  houseId: number;
-  uploadId: number;
-  roomplanData: CapturedRoom;
-  label?: string;
-  roomId?: number;
-}) {
-  const { houseId, uploadId, roomplanData, label, roomId } = params;
+// ---------------------------------------------------------------------------
+// Scan imports (review queue)
+// ---------------------------------------------------------------------------
+type Row = { entityType: string; entityIndex: number; field: string; value: string };
 
-  const parsed = parseCapturedRoom(roomplanData, label);
-
-  const scanImport = await prisma.scanImport.create({
-    data: {
-      houseId,
-      roomId: roomId ?? null,
-      uploadId,
-      label: parsed.label,
-      status: 'pending',
-    },
-  });
-
-  const dataRecords: Prisma.ScanImportDataCreateManyInput[] = [];
-
-  dataRecords.push(
-    { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'label', value: parsed.label },
-    { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'widthIn', value: String(parsed.widthIn) },
-    { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'depthIn', value: String(parsed.depthIn) },
-    { scanImportId: scanImport.id, entityType: 'room', entityIndex: 0, field: 'ceilingIn', value: String(parsed.ceilingIn) }
-  );
-
-  for (const wall of parsed.walls) {
-    dataRecords.push(
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'identifier', value: wall.identifier },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'startXIn', value: String(wall.startXIn) },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'startYIn', value: String(wall.startYIn) },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'endXIn', value: String(wall.endXIn) },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'endYIn', value: String(wall.endYIn) },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'heightIn', value: String(wall.heightIn) },
-      { scanImportId: scanImport.id, entityType: 'wall', entityIndex: wall.index, field: 'thicknessIn', value: String(wall.thicknessIn) }
-    );
-  }
-
-  for (const opening of parsed.openings) {
-    dataRecords.push(
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'identifier', value: opening.identifier },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'wallIdentifier', value: opening.wallIdentifier },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'type', value: opening.type },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'offsetIn', value: String(opening.offsetIn) },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'widthIn', value: String(opening.widthIn) },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'sillIn', value: String(opening.sillIn) },
-      { scanImportId: scanImport.id, entityType: 'opening', entityIndex: opening.index, field: 'headIn', value: String(opening.headIn) }
-    );
-  }
-
-  for (const obj of parsed.objects) {
-    dataRecords.push(
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'kind', value: obj.kind },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'xIn', value: String(obj.xIn) },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'yIn', value: String(obj.yIn) },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'rotationDeg', value: String(obj.rotationDeg) },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'widthIn', value: String(obj.widthIn) },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'depthIn', value: String(obj.depthIn) },
-      { scanImportId: scanImport.id, entityType: 'object', entityIndex: obj.index, field: 'heightIn', value: String(obj.heightIn) }
-    );
-  }
-
-  await prisma.scanImportData.createMany({ data: dataRecords });
-
-  await prisma.upload.update({
-    where: { id: uploadId },
-    data: { status: 'imported', scanImportId: scanImport.id },
-  });
-
-  return scanImport;
+function toRows(p: ParsedScan, label: string): Row[] {
+  const rows: Row[] = [];
+  const put = (entityType: string, entityIndex: number, obj: Record<string, unknown>) => {
+    for (const [field, v] of Object.entries(obj)) rows.push({ entityType, entityIndex, field, value: String(v) });
+  };
+  put('room', 0, { label, widthIn: p.widthIn, depthIn: p.depthIn, ceilingIn: p.ceilingIn, alignedByDeg: p.alignedByDeg });
+  p.walls.forEach((w, i) => put('wall', i, w));
+  p.openings.forEach((o, i) => put('opening', i, o));
+  p.objects.forEach((o, i) => put('object', i, o));
+  return rows;
 }
 
-export async function getScanImport(scanImportId: number) {
-  const scanImport = await prisma.scanImport.findUnique({
-    where: { id: scanImportId },
-    include: {
-      house: true,
-      room: true,
-      upload: true,
-      data: { orderBy: [{ entityType: 'asc' }, { entityIndex: 'asc' }, { field: 'asc' }] },
-      files: true,
-    },
-  });
-
-  if (!scanImport) {
-    throw new ApiError(404, 'not_found', 'Scan import not found');
-  }
-
-  const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
-  
-  for (const datum of scanImport.data) {
-    if (!dataByEntity[datum.entityType]) {
-      dataByEntity[datum.entityType] = {};
-    }
-    if (!dataByEntity[datum.entityType][datum.entityIndex]) {
-      dataByEntity[datum.entityType][datum.entityIndex] = {};
-    }
-    dataByEntity[datum.entityType][datum.entityIndex][datum.field] = datum.value;
-  }
-
+function fromRows(rows: Row[]) {
+  const by: Record<string, Record<number, Record<string, string>>> = {};
+  for (const r of rows) ((by[r.entityType] ??= {})[r.entityIndex] ??= {})[r.field] = r.value;
+  const list = (t: string) => Object.entries(by[t] ?? {}).sort(([a], [b]) => Number(a) - Number(b)).map(([, v]) => v);
+  const n = (v: string | undefined) => Number(v);
+  const room = by.room?.[0] ?? {};
   return {
-    ...scanImport,
-    parsedData: dataByEntity,
+    label: room.label ?? 'Scanned room',
+    scan: {
+      widthIn: n(room.widthIn), depthIn: n(room.depthIn), ceilingIn: n(room.ceilingIn), alignedByDeg: n(room.alignedByDeg),
+      walls: list('wall').map((w) => ({ key: w.key, startXIn: n(w.startXIn), startYIn: n(w.startYIn), endXIn: n(w.endXIn), endYIn: n(w.endYIn), heightIn: n(w.heightIn), lengthIn: n(w.lengthIn) })),
+      openings: list('opening').map((o) => ({ key: o.key, wallKey: o.wallKey, type: o.type as ParsedOpening['type'], offsetIn: n(o.offsetIn), widthIn: n(o.widthIn), sillIn: n(o.sillIn), headIn: n(o.headIn) })),
+      objects: list('object').map((o) => ({ key: o.key, kind: o.kind, xIn: n(o.xIn), yIn: n(o.yIn), rotationDeg: n(o.rotationDeg), widthIn: n(o.widthIn), depthIn: n(o.depthIn), heightIn: n(o.heightIn) })),
+    } as ParsedScan,
   };
+}
+
+export async function createScanImport(p: { houseId: number; uploadId: number; roomplanData: unknown; label: string; roomId: number | null }) {
+  const parsed = parseCapturedRoom(p.roomplanData);
+  return prisma.$transaction(async (tx) => {
+    if (await tx.scanImport.findUnique({ where: { uploadId: p.uploadId } })) throw new ApiError(409, 'already_imported', 'This upload was already imported');
+    const si = await tx.scanImport.create({ data: { houseId: p.houseId, roomId: p.roomId, uploadId: p.uploadId, label: p.label.slice(0, 120), status: 'pending' } });
+    await tx.scanImportData.createMany({ data: toRows(parsed, p.label).map((r) => ({ ...r, value: r.value.slice(0, 1000), scanImportId: si.id })) });
+    await tx.upload.update({ where: { id: p.uploadId }, data: { status: 'imported', scanImportId: si.id } });
+    return { id: si.id, status: si.status, label: si.label, walls: parsed.walls.length, openings: parsed.openings.length, objects: parsed.objects.length };
+  });
+}
+
+/** A room view (same shape as GET /api/workspaces/:id rooms) so the editor can draw the scan. */
+function previewRoom(label: string, s: ParsedScan) {
+  const byWall = new Map<string, ParsedOpening[]>();
+  for (const o of s.openings) byWall.set(o.wallKey, [...(byWall.get(o.wallKey) ?? []), o]);
+  let oid = 0;
+  return {
+    id: -1, slug: 'scan', label, draftWorkspaceId: null, originXIn: 0, originYIn: 0, rotationDeg: 0, ceilingIn: s.ceilingIn,
+    floor: { material: null, finish: null, color: null, keep: false }, wallColor: { name: null, color: null }, trimColor: { name: null, color: null },
+    measurementStatus: 'scan', measurements: {},
+    walls: s.walls.map((w, i) => ({
+      id: -(i + 1), roomId: -1, label: null, startXIn: w.startXIn, startYIn: w.startYIn, endXIn: w.endXIn, endYIn: w.endYIn,
+      heightIn: w.heightIn, thicknessIn: 5, isOpen: false, openTo: null, notes: null, measurementStatus: 'scan', measurements: {},
+      openings: (byWall.get(w.key) ?? []).map((o) => ({
+        id: -(++oid), wallId: -(i + 1), label: null, type: o.type, offsetIn: o.offsetIn, widthIn: o.widthIn, sillIn: o.sillIn, headIn: o.headIn,
+        flush: false, treatment: null, notes: null, measurementStatus: 'scan', measurements: {},
+      })),
+    })),
+    fixtures: [], furniture: [],
+  };
+}
+
+export async function getScanImport(id: number) {
+  const si = await prisma.scanImport.findUnique({
+    where: { id },
+    include: { room: { select: { id: true, label: true, slug: true } }, data: true, files: { select: { id: true, kind: true, format: true, bytes: true, status: true } } },
+  });
+  if (!si) throw new ApiError(404, 'not_found', 'Scan import not found');
+  const { label, scan } = fromRows(si.data);
+  const { data: _rows, ...rest } = si;
+  return { ...rest, parsed: scan, preview: { id: `scan:${si.id}`, name: `Scan #${si.id}: ${label}`, revision: null, units: 'in', rooms: [previewRoom(label, scan)] } };
 }
 
 export async function listScanImports(houseId: number, status?: 'pending' | 'promoted' | 'rejected') {
-  return prisma.scanImport.findMany({
-    where: {
-      houseId,
-      ...(status && { status }),
-    },
-    include: {
-      upload: true,
-      room: true,
-      files: { select: { id: true, kind: true, format: true, bytes: true, bucketKey: true } },
-    },
-    orderBy: { createdAt: 'desc' },
+  const rows = await prisma.scanImport.findMany({
+    where: { houseId, ...(status ? { status } : {}) }, orderBy: { createdAt: 'desc' }, take: 50,
+    include: { room: { select: { id: true, label: true } }, _count: { select: { data: true, files: true } } },
   });
+  return rows.map((r) => ({ id: r.id, status: r.status, label: r.label, room: r.room, createdAt: r.createdAt, promotedAt: r.promotedAt, files: r._count.files }));
 }
 
-export async function promoteScanImport(
-  scanImportId: number,
-  actor: 'michael' | 'agent' = 'michael',
-  tx?: any
-) {
-  const doPromotion = async (tx: any) => {
-    const scanImport = await tx.scanImport.findUnique({
-      where: { id: scanImportId },
-      include: {
-        house: true,
-        data: { orderBy: [{ entityType: 'asc' }, { entityIndex: 'asc' }, { field: 'asc' }] },
-      },
-    });
+export async function rejectScanImport(id: number, notes?: string) {
+  const r = await prisma.scanImport.updateMany({ where: { id, status: 'pending' }, data: { status: 'rejected', notes: notes ?? null } });
+  if (!r.count) {
+    if (!(await prisma.scanImport.findUnique({ where: { id } }))) throw new ApiError(404, 'not_found', 'Scan import not found');
+    throw new ApiError(409, 'already_processed', 'This scan was already promoted or rejected');
+  }
+  return { id, status: 'rejected' as const };
+}
 
-    if (!scanImport) {
-      throw new ApiError(404, 'not_found', 'Scan import not found');
-    }
+// ---------------------------------------------------------------------------
+// Promote to Current
+// ---------------------------------------------------------------------------
+const d2 = (ax: number, ay: number, bx: number, by: number) => Math.hypot(ax - bx, ay - by);
+type WallGeom = { startXIn: number; startYIn: number; endXIn: number; endYIn: number };
+/** Average endpoint distance between two walls, and whether the scan wall runs the other way. */
+export function wallDistance(a: WallGeom, b: WallGeom) {
+  const same = (d2(a.startXIn, a.startYIn, b.startXIn, b.startYIn) + d2(a.endXIn, a.endYIn, b.endXIn, b.endYIn)) / 2;
+  const flip = (d2(a.startXIn, a.startYIn, b.endXIn, b.endYIn) + d2(a.endXIn, a.endYIn, b.startXIn, b.startYIn)) / 2;
+  return flip < same ? { dist: flip, reversed: true } : { dist: same, reversed: false };
+}
+/** Walls closer than this (average endpoint distance) are treated as the same wall. */
+export const WALL_MATCH_IN = 36;
+/** Openings on the same wall whose centers are closer than this are the same opening. */
+export const OPENING_MATCH_IN = 24;
 
-    if (scanImport.status !== 'pending') {
-      throw new ApiError(400, 'already_processed', 'Scan import has already been promoted or rejected');
-    }
-
-    const dataByEntity: Record<string, Record<number, Record<string, string>>> = {};
-    for (const datum of scanImport.data) {
-      if (!dataByEntity[datum.entityType]) {
-        dataByEntity[datum.entityType] = {};
-      }
-      if (!dataByEntity[datum.entityType][datum.entityIndex]) {
-        dataByEntity[datum.entityType][datum.entityIndex] = {};
-      }
-      dataByEntity[datum.entityType][datum.entityIndex][datum.field] = datum.value;
-    }
-
-    const roomData = dataByEntity.room?.[0];
-    if (!roomData) {
-      throw new ApiError(400, 'invalid_data', 'No room data found in scan import');
-    }
-
-    const slug = roomData.label?.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'scanned-room';
-    
-    const existingRoom = await tx.room.findFirst({
-      where: {
-        houseId: scanImport.houseId,
-        slug,
-        draftWorkspaceId: null,
-      },
-      include: {
-        walls: { include: { openings: true } },
-      },
-    });
-
-    const changes: Op[] = [];
-    const measurements: Array<{
-      entityType: string;
-      entityId?: number;
-      entityRef?: string;
-      field: string;
-      valueIn: number;
-    }> = [];
-
-    if (!existingRoom) {
-      changes.push({
-        op: 'create',
-        entityType: 'room',
-        tempRef: 'room-1',
-        fields: {
-          houseId: scanImport.houseId,
-          slug,
-          label: roomData.label,
-          ceilingIn: Number(roomData.ceilingIn),
-          measurementStatus: 'scan',
-          floorMaterial: 'hardwood',
-          floorColor: '#d4a574',
-          floorKeep: true,
-          draftWorkspaceId: null,
-        },
-      });
-      measurements.push({
-        entityType: 'room',
-        entityRef: 'room-1',
-        field: 'ceilingIn',
-        valueIn: Number(roomData.ceilingIn),
-      });
-    } else {
-      const ceilingPin = await tx.measurement.findFirst({
-        where: {
-          entityType: 'room',
-          entityId: existingRoom.id,
-          field: 'ceilingIn',
-          source: 'manual',
-          isOverride: true,
-          unpinnedAt: null,
-        },
-      });
-
-      measurements.push({
-        entityType: 'room',
-        entityId: existingRoom.id,
-        field: 'ceilingIn',
-        valueIn: Number(roomData.ceilingIn),
-      });
-
-      if (!ceilingPin) {
-        changes.push({
-          op: 'update',
-          entityType: 'room',
-          entityId: existingRoom.id,
-          field: 'ceilingIn',
-          after: Number(roomData.ceilingIn),
-        });
-      }
-
-      changes.push({
-        op: 'update',
-        entityType: 'room',
-        entityId: existingRoom.id,
-        field: 'label',
-        after: roomData.label,
-      });
-
-      for (const wall of existingRoom.walls) {
-        changes.push({ op: 'delete', entityType: 'wall', entityId: wall.id });
-      }
-    }
-
-    for (const [idxStr, wallData] of Object.entries(dataByEntity.wall || {})) {
-      const wallRef = `wall-${idxStr}`;
-      changes.push({
-        op: 'create',
-        entityType: 'wall',
-        tempRef: wallRef,
-        fields: {
-          roomId: existingRoom ? existingRoom.id : `$room-1`,
-          startXIn: Number(wallData.startXIn),
-          startYIn: Number(wallData.startYIn),
-          endXIn: Number(wallData.endXIn),
-          endYIn: Number(wallData.endYIn),
-          heightIn: Number(wallData.heightIn),
-          thicknessIn: Number(wallData.thicknessIn || 5),
-          measurementStatus: 'scan',
-        },
-      });
-
-      measurements.push(
-        { entityType: 'wall', entityRef: wallRef, field: 'startXIn', valueIn: Number(wallData.startXIn) },
-        { entityType: 'wall', entityRef: wallRef, field: 'startYIn', valueIn: Number(wallData.startYIn) },
-        { entityType: 'wall', entityRef: wallRef, field: 'endXIn', valueIn: Number(wallData.endXIn) },
-        { entityType: 'wall', entityRef: wallRef, field: 'endYIn', valueIn: Number(wallData.endYIn) },
-        { entityType: 'wall', entityRef: wallRef, field: 'heightIn', valueIn: Number(wallData.heightIn) },
-        { entityType: 'wall', entityRef: wallRef, field: 'thicknessIn', valueIn: Number(wallData.thicknessIn || 5) }
-      );
-    }
-
-    const wallRefs = new Map<string, string>();
-    for (const [idxStr, wallData] of Object.entries(dataByEntity.wall || {})) {
-      wallRefs.set(wallData.identifier, `wall-${idxStr}`);
-    }
-
-    for (const [idxStr, openingData] of Object.entries(dataByEntity.opening || {})) {
-      const wallRef = wallRefs.get(openingData.wallIdentifier);
-      if (wallRef) {
-        const openingRef = `opening-${idxStr}`;
-        changes.push({
-          op: 'create',
-          entityType: 'opening',
-          tempRef: openingRef,
-          fields: {
-            wallId: `$${wallRef}`,
-            type: openingData.type,
-            offsetIn: Number(openingData.offsetIn),
-            widthIn: Number(openingData.widthIn),
-            sillIn: Number(openingData.sillIn),
-            headIn: Number(openingData.headIn),
-            measurementStatus: 'scan',
-          },
-        });
-
-        measurements.push(
-          { entityType: 'opening', entityRef: openingRef, field: 'offsetIn', valueIn: Number(openingData.offsetIn) },
-          { entityType: 'opening', entityRef: openingRef, field: 'widthIn', valueIn: Number(openingData.widthIn) },
-          { entityType: 'opening', entityRef: openingRef, field: 'sillIn', valueIn: Number(openingData.sillIn) },
-          { entityType: 'opening', entityRef: openingRef, field: 'headIn', valueIn: Number(openingData.headIn) }
-        );
-      }
-    }
-
-    let revisionNumber = scanImport.house.currentRevision || 0;
-    let roomId = existingRoom?.id;
-    
-    const result = await saveChangesForRescan(
-      tx,
-      null,
-      revisionNumber,
-      changes,
-      `Promoted scan: ${roomData.label}`,
-      { houseId: scanImport.houseId }
-    );
-    revisionNumber = typeof result.revision === 'number' ? result.revision : result.revision.number;
-    
-    if (!existingRoom) {
-      roomId = result.refs['room-1'];
-    }
-
-    for (const meas of measurements) {
-      let entityId = meas.entityId;
-      if (!entityId && meas.entityRef) {
-        entityId = result.refs[meas.entityRef];
-      }
-
-      if (entityId) {
-        const existingPin = await tx.measurement.findFirst({
-          where: {
-            entityType: meas.entityType,
-            entityId,
-            field: meas.field,
-            source: 'manual',
-            isOverride: true,
-            unpinnedAt: null,
-          },
-        });
-
-        await tx.measurement.create({
-          data: {
-            entityType: meas.entityType,
-            entityId,
-            field: meas.field,
-            valueIn: meas.valueIn,
-            source: 'scan',
-            isOverride: false,
-            uploadId: scanImport.uploadId,
-            recordedBy: 'system',
-            note: existingPin ? `Scanned value (not applied - pinned to ${existingPin.valueIn})` : null,
-          },
-        });
-      }
-    }
-
-    await tx.scanImport.update({
-      where: { id: scanImportId },
-      data: {
-        status: 'promoted',
-        promotedAt: new Date(),
-        promotedBy: actor,
-        roomId,
-      },
-    });
-
-    await tx.house.update({
-      where: { id: scanImport.houseId },
-      data: { currentRevision: revisionNumber },
-    });
-
-    return { success: true, roomId, revisionId: revisionNumber };
+/**
+ * A rescan's frame is arbitrary up to a quarter turn (RoomPlan's world frame starts wherever the
+ * phone was; the parser squares walls to the axes but can't know which way is "north"). Try the
+ * four quarter turns, aligning bounding boxes, and keep the one whose walls land closest to the
+ * existing walls.
+ */
+export function alignToRoom<T extends WallGeom>(scanWalls: T[], existing: WallGeom[]): { walls: T[]; quarterTurns: number } {
+  if (!existing.length) return { walls: scanWalls, quarterTurns: 0 };
+  const bbox = (ws: WallGeom[]) => {
+    const xs = ws.flatMap((w) => [w.startXIn, w.endXIn]), ys = ws.flatMap((w) => [w.startYIn, w.endYIn]);
+    return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
   };
-
-  if (tx) {
-    return await doPromotion(tx);
-  } else {
-    return await prisma.$transaction(async (t) => doPromotion(t), { timeout: 30_000 });
+  const shift = (ws: T[], dx: number, dy: number) => ws.map((w) => ({ ...w, startXIn: w.startXIn + dx, startYIn: w.startYIn + dy, endXIn: w.endXIn + dx, endYIn: w.endYIn + dy }));
+  const cost = (ws: WallGeom[]) => ws.reduce((a, w) => a + Math.min(120, ...existing.map((e) => wallDistance(e, w).dist)), 0);
+  const target = bbox(existing);
+  let best: { walls: T[]; cost: number; k: number } | null = null;
+  for (let k = 0; k < 4; k++) {
+    const rot = (x: number, y: number): [number, number] => (k === 0 ? [x, y] : k === 1 ? [-y, x] : k === 2 ? [-x, -y] : [y, -x]);
+    const turned = scanWalls.map((w) => {
+      const [sx, sy] = rot(w.startXIn, w.startYIn), [ex, ey] = rot(w.endXIn, w.endYIn);
+      return { ...w, startXIn: sx, startYIn: sy, endXIn: ex, endYIn: ey };
+    });
+    const b = bbox(turned);
+    // A partial scan lines up with either the near or the far corner of the existing room.
+    for (const [dx, dy] of [[target.x0 - b.x0, target.y0 - b.y0], [target.x1 - b.x1, target.y1 - b.y1], [target.x0 - b.x0, target.y1 - b.y1], [target.x1 - b.x1, target.y0 - b.y0]]) {
+      const moved = shift(turned, dx, dy);
+      const c = cost(moved);
+      if (!best || c < best.cost) best = { walls: moved, cost: c, k };
+    }
   }
+  // Refine the translation with the median endpoint offset of matched walls (robust to one moved wall).
+  const dxs: number[] = [], dys: number[] = [];
+  for (const w of best!.walls) {
+    let m: { e: WallGeom; dist: number; reversed: boolean } | null = null;
+    for (const e of existing) { const d = wallDistance(e, w); if (d.dist <= WALL_MATCH_IN && (!m || d.dist < m.dist)) m = { e, ...d }; }
+    if (!m) continue;
+    const [sx, sy, ex, ey] = m.reversed ? [w.endXIn, w.endYIn, w.startXIn, w.startYIn] : [w.startXIn, w.startYIn, w.endXIn, w.endYIn];
+    dxs.push(m.e.startXIn - sx, m.e.endXIn - ex); dys.push(m.e.startYIn - sy, m.e.endYIn - ey);
+  }
+  const median = (xs: number[]) => { if (!xs.length) return 0; const v = [...xs].sort((a, b) => a - b); return v[Math.floor(v.length / 2)]; };
+  return { walls: shift(best!.walls, Math.round(median(dxs)), Math.round(median(dys))), quarterTurns: best!.k };
 }
 
-export async function rejectScanImport(scanImportId: number, notes?: string) {
-  const scanImport = await prisma.scanImport.findUnique({ where: { id: scanImportId } });
+const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'room';
 
-  if (!scanImport) {
-    throw new ApiError(404, 'not_found', 'Scan import not found');
+export async function promoteScanImport(id: number, actor: 'michael' = 'michael') {
+  return prisma.$transaction((tx) => promoteIn(tx, id, actor), { timeout: 60_000 });
+}
+
+export async function promoteIn(tx: Tx, id: number, actor: 'michael') {
+  const si = await tx.scanImport.findUnique({ where: { id }, include: { data: true } });
+  if (!si) throw new ApiError(404, 'not_found', 'Scan import not found');
+  await lockHouse(tx, si.houseId);
+  const fresh = await tx.scanImport.findUniqueOrThrow({ where: { id } });
+  if (fresh.status !== 'pending') throw new ApiError(409, 'already_processed', 'This scan was already promoted or rejected');
+  const { label, scan } = fromRows(si.data);
+  if (!scan.walls.length) throw new ApiError(400, 'invalid_scan', 'The scan has no walls');
+
+  let room = si.roomId != null ? await tx.room.findUnique({ where: { id: si.roomId }, include: { walls: { include: { openings: true, fixtures: { select: { id: true } } } } } }) : null;
+  if (room && room.draftWorkspaceId !== null) throw new ApiError(409, 'not_current', 'This scan targets a draft room; scans only promote into Current rooms');
+
+  const ops: Op[] = [];
+  const kept: string[] = [];
+  /** Scanned values to record as measurement rows: entity ref (id or $tempRef), field, value. */
+  const scanned: { ref: number | string; entityType: string; field: string; valueIn: number }[] = [];
+  const pinnedNow = async (entityType: string, entityId: number, field: string) => isPinned(tx, entityType, entityId, field);
+  const setIfFree = async (entityType: string, entityId: number, field: string, value: number, current: number | null) => {
+    scanned.push({ ref: entityId, entityType, field, valueIn: value });
+    if (await pinnedNow(entityType, entityId, field)) { kept.push(`${entityType} ${entityId} ${field} (pinned)`); return; }
+    if (current !== value) ops.push({ op: 'update', entityType, entityId, field, after: value });
+  };
+  const wallFields = ['startXIn', 'startYIn', 'endXIn', 'endYIn', 'heightIn'] as const;
+  const openingFields = ['offsetIn', 'widthIn', 'sillIn', 'headIn'] as const;
+  const createWall = (w: ParsedWall, i: number, roomRef: number | string) => {
+    const ref = `wall${i}`;
+    ops.push({ op: 'create', entityType: 'wall', tempRef: ref, fields: { roomId: roomRef, startXIn: w.startXIn, startYIn: w.startYIn, endXIn: w.endXIn, endYIn: w.endYIn, heightIn: w.heightIn, thicknessIn: 5, measurementStatus: 'scan' } });
+    for (const f of wallFields) scanned.push({ ref: `$${ref}`, entityType: 'wall', field: f, valueIn: w[f] });
+    return `$${ref}`;
+  };
+  const createOpening = (o: ParsedOpening, i: number, wallRef: number | string) => {
+    const ref = `opening${i}`;
+    ops.push({ op: 'create', entityType: 'opening', tempRef: ref, fields: { wallId: wallRef, type: o.type, offsetIn: o.offsetIn, widthIn: o.widthIn, sillIn: o.sillIn, headIn: o.headIn, measurementStatus: 'scan' } });
+    for (const f of openingFields) scanned.push({ ref: `$${ref}`, entityType: 'opening', field: f, valueIn: o[f] });
+  };
+  const openingsByWall = new Map<string, { o: ParsedOpening; i: number }[]>();
+  scan.openings.forEach((o, i) => openingsByWall.set(o.wallKey, [...(openingsByWall.get(o.wallKey) ?? []), { o, i }]));
+
+  let created = false;
+  if (!room) {
+    // New Current room from this scan.
+    const base = slugify(label);
+    let slug = base, n = 2;
+    while (await tx.room.findFirst({ where: { houseId: si.houseId, draftWorkspaceId: null, slug } })) slug = `${base}-${n++}`;
+    ops.push({ op: 'create', entityType: 'room', tempRef: 'room', fields: { houseId: si.houseId, slug, label, ceilingIn: scan.ceilingIn, measurementStatus: 'scan' } });
+    scanned.push({ ref: '$room', entityType: 'room', field: 'ceilingIn', valueIn: scan.ceilingIn });
+    created = true;
+    scan.walls.forEach((w, i) => {
+      const wref = createWall(w, i, '$room');
+      for (const { o, i: oi } of openingsByWall.get(w.key) ?? []) createOpening(o, oi, wref);
+    });
+  } else {
+    await setIfFree('room', room.id, 'ceilingIn', scan.ceilingIn, room.ceilingIn);
+    if (room.measurementStatus !== 'scan') ops.push({ op: 'update', entityType: 'room', entityId: room.id, field: 'measurementStatus', after: 'scan' });
+
+    // Put the scan in the existing room's frame, then greedily match nearest walls.
+    const aligned = alignToRoom(scan.walls, room.walls.filter((w) => !w.isOpen));
+    scan.walls = aligned.walls;
+    const pairs: { si: number; wi: number; dist: number; reversed: boolean }[] = [];
+    scan.walls.forEach((sw, si2) => room!.walls.forEach((ew, wi) => {
+      if (ew.isOpen) return; // open edges are drawn by hand; scans don't produce them
+      const m = wallDistance(ew, sw);
+      if (m.dist <= WALL_MATCH_IN) pairs.push({ si: si2, wi, ...m });
+    }));
+    pairs.sort((a, b) => a.dist - b.dist);
+    const usedS = new Set<number>(), usedW = new Set<number>();
+    const matches: typeof pairs = [];
+    for (const p of pairs) if (!usedS.has(p.si) && !usedW.has(p.wi)) { usedS.add(p.si); usedW.add(p.wi); matches.push(p); }
+
+    for (const m of matches) {
+      const ew = room.walls[m.wi];
+      const raw = scan.walls[m.si];
+      // Keep the existing wall's direction so its openings' offsets (measured from its start) stay meaningful.
+      const sw = m.reversed ? { ...raw, startXIn: raw.endXIn, startYIn: raw.endYIn, endXIn: raw.startXIn, endYIn: raw.startYIn } : raw;
+      for (const f of wallFields) await setIfFree('wall', ew.id, f, sw[f], ew[f]);
+      if (ew.measurementStatus !== 'scan') ops.push({ op: 'update', entityType: 'wall', entityId: ew.id, field: 'measurementStatus', after: 'scan' });
+      const len = raw.lengthIn;
+      const scannedOpenings = (openingsByWall.get(raw.key) ?? []).map(({ o, i }) => ({ i, o: m.reversed ? { ...o, offsetIn: Math.max(0, len - o.offsetIn - o.widthIn) } : o }));
+      // Match openings on this wall by type and center position.
+      const op2: { s: number; e: number; dist: number }[] = [];
+      scannedOpenings.forEach(({ o }, s) => ew.openings.forEach((eo, e) => {
+        if (eo.type !== o.type) return;
+        const dist = Math.abs(eo.offsetIn + eo.widthIn / 2 - (o.offsetIn + o.widthIn / 2));
+        if (dist <= OPENING_MATCH_IN) op2.push({ s, e, dist });
+      }));
+      op2.sort((a, b) => a.dist - b.dist);
+      const uS = new Set<number>(), uE = new Set<number>();
+      for (const p of op2) {
+        if (uS.has(p.s) || uE.has(p.e)) continue;
+        uS.add(p.s); uE.add(p.e);
+        const eo = ew.openings[p.e], o = scannedOpenings[p.s].o;
+        for (const f of openingFields) await setIfFree('opening', eo.id, f, o[f], eo[f]);
+        if (eo.measurementStatus !== 'scan') ops.push({ op: 'update', entityType: 'opening', entityId: eo.id, field: 'measurementStatus', after: 'scan' });
+      }
+      for (const [e, eo] of ew.openings.entries()) {
+        if (uE.has(e)) continue;
+        if (eo.type === 'fireplace') { kept.push(`opening ${eo.id} (fireplace; scans don't detect these)`); continue; }
+        if (await anyPin(tx, 'opening', eo.id, openingFields)) { kept.push(`opening ${eo.id} (not in scan, but has pinned values)`); continue; }
+        ops.push({ op: 'delete', entityType: 'opening', entityId: eo.id });
+      }
+      scannedOpenings.forEach(({ o, i }, s) => { if (!uS.has(s)) createOpening(o, i, ew.id); });
+    }
+
+    // Existing walls the scan didn't see: remove unless something pins them in place.
+    for (const [wi, ew] of room.walls.entries()) {
+      if (usedW.has(wi)) continue;
+      if (ew.isOpen) { kept.push(`wall ${ew.id} (open edge)`); continue; }
+      const pinnedOpening = await Promise.all(ew.openings.map((o) => anyPin(tx, 'opening', o.id, openingFields)));
+      if (ew.fixtures.length || ew.openings.some((o) => o.type === 'fireplace') || pinnedOpening.some(Boolean) || (await anyPin(tx, 'wall', ew.id, wallFields))) {
+        kept.push(`wall ${ew.id} (not in scan, but has pins, fixtures or a fireplace)`); continue;
+      }
+      for (const o of ew.openings) ops.push({ op: 'delete', entityType: 'opening', entityId: o.id });
+      ops.push({ op: 'delete', entityType: 'wall', entityId: ew.id });
+    }
+    // New walls.
+    scan.walls.forEach((w, i) => {
+      if (usedS.has(i)) return;
+      const wref = createWall(w, i, room!.id);
+      for (const { o, i: oi } of openingsByWall.get(w.key) ?? []) createOpening(o, oi, wref);
+    });
   }
 
-  if (scanImport.status !== 'pending') {
-    throw new ApiError(400, 'already_processed', 'Scan import has already been promoted or rejected');
-  }
-
-  await prisma.scanImport.update({
-    where: { id: scanImportId },
-    data: {
-      status: 'rejected',
-      notes,
-    },
+  const { changes, refs } = await applyOps(tx, ops, { workspaceId: null, mode: 'rescan', trusted: true });
+  const rev = await commitRevision(tx, {
+    workspaceId: null, houseId: si.houseId, kind: 'rescan', actor, changes,
+    note: [`Promoted scan #${si.id} (${label})`, kept.length ? `Kept: ${kept.join('; ')}` : ''].filter(Boolean).join('. '),
   });
+  const resolveRef = (r: number | string) => (typeof r === 'number' ? r : refs[r.slice(1)]);
+  await tx.measurement.createMany({
+    data: scanned.map((m) => ({
+      entityType: m.entityType, entityId: resolveRef(m.ref), field: m.field, valueIn: m.valueIn, source: 'scan' as const,
+      isOverride: false, uploadId: si.uploadId, recordedBy: actor, note: `Scan #${si.id}`,
+    })),
+  });
+  const roomId = room?.id ?? refs.room;
+  await tx.scanImport.update({ where: { id }, data: { status: 'promoted', promotedAt: new Date(), promotedBy: actor, roomId } });
+  return { scanImportId: id, roomId, roomCreated: created, revision: rev.number, changeRows: changes.length, measurementsRecorded: scanned.length, kept };
+}
 
-  return { success: true };
+async function anyPin(tx: Tx, entityType: string, entityId: number, fields: readonly string[]) {
+  for (const f of fields) if (await isPinned(tx, entityType, entityId, f)) return true;
+  return false;
 }

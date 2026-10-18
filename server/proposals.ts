@@ -88,9 +88,7 @@ async function applyProposal(tx: Tx, p: { id: number; targetWorkspaceId: number 
   let workspaceId: number;
   let idMap: Map<string, number> | undefined;
   if (p.targetWorkspaceId != null) {
-    const lockedWs = await lockWorkspace(tx, p.targetWorkspaceId);
-    if (!lockedWs) throw new ApiError(404, 'workspace_not_found', `Workspace ${p.targetWorkspaceId} not found`);
-    workspaceId = lockedWs.id;
+    workspaceId = (await lockWorkspace(tx, p.targetWorkspaceId)).id;
   } else {
     if (p.baseWorkspaceId == null) throw new ApiError(409, 'no_base', 'The workspace this proposal copies from no longer exists');
     const copy = await copyWorkspace(tx, p.baseWorkspaceId, p.newWorkspaceName || 'New design', p.createdBy, forReal ? p.id : undefined);

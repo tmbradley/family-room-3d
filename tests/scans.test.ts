@@ -1,147 +1,90 @@
+/**
+ * RoomPlan parser tests against Apple's CapturedRoom Codable layout (keyed-enum categories,
+ * simd_float3 dimensions with height at [1], column-major 4x4 transforms, parentIdentifier).
+ * Fixtures are synthetic rooms built in that layout (fixtures/roomplan-builder.mjs), plus one wall
+ * copied verbatim from a published CapturedRoom JSON sample.
+ */
 import { test } from 'node:test';
-import assert from 'node:assert';
-import { PrismaClient } from '@prisma/client';
-import { parseCapturedRoom, type CapturedRoom } from '../server/scans.js';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+await import('./helpers.js');
+const { parseCapturedRoom, alignToRoom } = await import('../server/scans.js');
+// @ts-ignore plain JS module
+const { buildCapturedRoom, SAMPLE, uuid } = await import('../fixtures/roomplan-builder.mjs');
 
-if (!process.env.TEST_DATABASE_URL) {
-  throw new Error('TEST_DATABASE_URL environment variable is required for tests. Never use DATABASE_URL for testing.');
-}
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const fixture = JSON.parse(readFileSync(new URL('../fixtures/sample-roomplan.json', import.meta.url), 'utf8'));
 
-const prisma = new PrismaClient({ datasources: { db: { url: TEST_DATABASE_URL } } });
-
-// Sample CapturedRoom fixture - Real Apple RoomPlan format
-const sampleCapturedRoom: CapturedRoom = {
-  dimensions: [3.6576, 3.9624, 2.7432], // [width, length, height] in meters
-  walls: [
-    {
-      identifier: 'wall-0',
-      category: 'wall',
-      dimensions: [3.6576, 0.127, 2.7432],
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-      confidence: 'high',
-    },
-    {
-      identifier: 'wall-1',
-      category: 'wall',
-      dimensions: [3.9624, 0.127, 2.7432],
-      transform: [0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, 0, 3.6576, 0, 0, 1],
-      confidence: 'high',
-    },
-    {
-      identifier: 'wall-2',
-      category: 'wall',
-      dimensions: [3.6576, 0.127, 2.7432],
-      transform: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 3.6576, 0, 3.9624, 1],
-      confidence: 'high',
-    },
-    {
-      identifier: 'wall-3',
-      category: 'wall',
-      dimensions: [3.9624, 0.127, 2.7432],
-      transform: [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 3.9624, 1],
-      confidence: 'high',
-    },
-  ],
-  doors: [
-    {
-      identifier: 'door-0',
-      parentIdentifier: 'wall-3',
-      category: 'door',
-      dimensions: [0.9144, 2.0320], // [width, height] ~3 ft × 6.67 ft
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.9144, 0, 1.9812, 1],
-      confidence: 'medium',
-    },
-  ],
-  windows: [
-    {
-      identifier: 'window-0',
-      parentIdentifier: 'wall-2',
-      category: 'window',
-      dimensions: [1.524, 1.2192], // [width, height] ~5 ft × 4 ft
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.2192, 1.2192, 0, 1],
-      confidence: 'high',
-    },
-  ],
-  openings: [],
-  objects: [
-    {
-      identifier: 'sofa-0',
-      category: 'sofa',
-      dimensions: [2.1336, 0.9144, 0.8382], // ~7 ft × 3 ft × 2.75 ft
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.8288, 0.4191, 0.6096, 1],
-      confidence: 'medium',
-    },
-    {
-      identifier: 'table-0',
-      category: 'table',
-      dimensions: [1.2192, 0.6096, 0.4572], // ~4 ft × 2 ft × 1.5 ft
-      transform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1.8288, 0.2286, 1.8288, 1],
-      confidence: 'medium',
-    },
-  ],
-};
-
-test('parseCapturedRoom converts meters to inches', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom);
-
-  // Check room dimensions (meters to inches)
-  assert.strictEqual(parsed.widthIn, 144); // ~12 feet
-  assert.strictEqual(parsed.depthIn, 156); // ~13 feet
-  assert.strictEqual(parsed.ceilingIn, 108); // ~9 feet
+test('sample fixture is in RoomPlan layout and parses to a squared 12x13 room', () => {
+  assert.deepEqual(fixture.walls[0].category, { wall: {} });
+  assert.deepEqual(fixture.doors[0].category, { door: { isOpen: false } });
+  assert.equal(fixture.walls[0].dimensions.length, 3);
+  assert.equal(fixture.walls[0].dimensions[2], 0);
+  assert.equal(fixture.walls[0].transform.length, 16);
+  const r = parseCapturedRoom(fixture);
+  assert.equal(r.widthIn, 144);
+  assert.equal(r.depthIn, 156);
+  assert.equal(r.ceilingIn, 108);
+  assert.equal(r.alignedByDeg, 30);
+  assert.deepEqual(r.walls.map((w) => [w.startXIn, w.startYIn, w.endXIn, w.endYIn, w.heightIn]), [
+    [0, 0, 144, 0, 108], [144, 0, 144, 156, 108], [144, 156, 0, 156, 108], [0, 156, 0, 0, 108],
+  ]);
 });
 
-test('parseCapturedRoom extracts walls', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom);
-
-  assert.strictEqual(parsed.walls.length, 4);
-  assert.ok(parsed.walls.every(w => w.heightIn > 0));
-  assert.ok(parsed.walls.every(w => w.thicknessIn === 5)); // default thickness
+test('openings: parent wall from parentIdentifier, offset along the wall, sill/head from height', () => {
+  const r = parseCapturedRoom(fixture);
+  const by = Object.fromEntries(r.openings.map((o) => [o.type, o]));
+  assert.deepEqual(by.window, { key: uuid(12), wallKey: uuid(1), type: 'window', offsetIn: 42, widthIn: 60, sillIn: 36, headIn: 84 });
+  assert.deepEqual(by.door, { key: uuid(11), wallKey: uuid(4), type: 'door', offsetIn: 24, widthIn: 36, sillIn: 0, headIn: 80 });
+  assert.deepEqual(by.open_span, { key: uuid(13), wallKey: uuid(2), type: 'open_span', offsetIn: 40, widthIn: 72, sillIn: 0, headIn: 84 });
 });
 
-test('parseCapturedRoom extracts openings', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom);
-
-  assert.strictEqual(parsed.openings.length, 2);
-  
-  const window = parsed.openings.find(o => o.type === 'window');
-  assert.ok(window);
-  assert.ok(window.widthIn > 0);
-  assert.ok(window.sillIn >= 0);
-  assert.ok(window.headIn > window.sillIn);
-
-  const door = parsed.openings.find(o => o.type === 'door');
-  assert.ok(door);
-  assert.ok(door.widthIn > 0);
+test('objects: category from the keyed enum, dimensions [width, height, depth]', () => {
+  const r = parseCapturedRoom(fixture);
+  const sofa = r.objects.find((o) => o.kind === 'sofa')!;
+  assert.deepEqual({ ...sofa, key: undefined }, { key: undefined, kind: 'sofa', xIn: 72, yIn: 120, rotationDeg: 0, widthIn: 84, heightIn: 34, depthIn: 36 });
+  assert.ok(r.objects.some((o) => o.kind === 'table'));
 });
 
-test('parseCapturedRoom extracts objects', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom);
-
-  assert.strictEqual(parsed.objects.length, 2);
-
-  const sofa = parsed.objects.find(o => o.kind === 'sofa');
-  assert.ok(sofa);
-  assert.ok(sofa.widthIn > 0);
-  assert.ok(sofa.depthIn > 0);
-  assert.ok(sofa.heightIn > 0);
-
-  const table = parsed.objects.find(o => o.kind === 'table');
-  assert.ok(table);
-  assert.ok(table.widthIn > 0);
+test('a wall copied from a published CapturedRoom sample: length = dimensions[0], height = dimensions[1]', () => {
+  const r = parseCapturedRoom({
+    walls: [{
+      completedEdges: [], story: 0, curve: null, identifier: '1786EBF8-1C92-486A-9B99-D6168FDF6052', parentIdentifier: null,
+      confidence: { high: {} }, category: { wall: {} }, dimensions: [2.6529655, 2.415, 0],
+      transform: [-0.50751626, 0, 0.8616421, 0, 0, 1, 0, 0, 0.8616421, 0, 0.50751626, 0, -0.49793836, -0.16968237, -0.6089062, 1],
+      polygonCorners: [],
+    }],
+    doors: [], windows: [], openings: [], objects: [],
+  });
+  const w = r.walls[0];
+  assert.equal(w.lengthIn, 104);
+  assert.equal(w.heightIn, 95);
+  assert.equal(Math.round(Math.hypot(w.endXIn - w.startXIn, w.endYIn - w.startYIn)), 104);
+  // Squared to an axis.
+  assert.ok(w.startXIn === w.endXIn || w.startYIn === w.endYIn);
 });
 
-test('parseCapturedRoom respects custom label', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom, 'Family Room');
-  assert.strictEqual(parsed.label, 'Family Room');
+test('same room scanned from a different heading and position parses to the same plan (up to a quarter turn)', () => {
+  const a = parseCapturedRoom(fixture);
+  const b = parseCapturedRoom(buildCapturedRoom({ ...SAMPLE, yawDeg: 123, origin: { x: -4.2, z: 2.9 }, floorY: -1.45 }));
+  assert.equal(b.ceilingIn, 108);
+  const { walls, quarterTurns } = alignToRoom(b.walls, a.walls);
+  assert.ok(quarterTurns >= 0);
+  for (const w of a.walls) {
+    const near = walls.some((x) => [[x.startXIn, x.startYIn, x.endXIn, x.endYIn]].some(([sx, sy, ex, ey]) =>
+      Math.abs(sx - w.startXIn) <= 1 && Math.abs(sy - w.startYIn) <= 1 && Math.abs(ex - w.endXIn) <= 1 && Math.abs(ey - w.endYIn) <= 1));
+    assert.ok(near, `wall ${JSON.stringify(w)} not found after alignment`);
+  }
 });
 
-test('parseCapturedRoom uses default label', () => {
-  const parsed = parseCapturedRoom(sampleCapturedRoom);
-  assert.strictEqual(parsed.label, 'Scanned Room');
+test('iOS 16 scans without parentIdentifier attach openings to the nearest wall', () => {
+  const r = parseCapturedRoom(buildCapturedRoom({ ...SAMPLE, parents: false }));
+  const win = r.openings.find((o) => o.type === 'window')!;
+  assert.equal(win.wallKey, uuid(1));
+  assert.equal(win.offsetIn, 42);
 });
 
-// Clean up
-test.after(async () => {
-  await prisma.$disconnect();
+test('rejects data that is not a CapturedRoom', () => {
+  assert.throws(() => parseCapturedRoom({ dimensions: [3, 3, 3] }), /Not a RoomPlan CapturedRoom/);
+  assert.throws(() => parseCapturedRoom({ walls: [{ identifier: 'w', category: { wall: {} }, dimensions: [1, 2], transform: [1] }] }), /Not a RoomPlan CapturedRoom/);
+  assert.throws(() => parseCapturedRoom('not json'), /Not a RoomPlan CapturedRoom/);
 });

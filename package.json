@@ -13,7 +13,7 @@
     "seed": "tsx scripts/seed.ts",
     "setup-code": "tsx scripts/create-setup-code.ts",
     "agent-key": "tsx scripts/create-agent-key.ts",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --import tsx --import ./tests/setup.ts --test --test-concurrency=1 tests/*.test.ts",
     "db:predeploy": "tsx scripts/predeploy.ts"
   },
   "dependencies": {

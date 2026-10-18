@@ -1,23 +1,15 @@
-/*
-  Warnings:
-
-  - You are about to alter the column `expires_at` on the `upload_tokens` table. The data in that column could be lost. The data in that column will be cast from `DateTime(3)` to `DateTime(0)`.
-  - You are about to alter the column `used_at` on the `upload_tokens` table. The data in that column could be lost. The data in that column will be cast from `DateTime(3)` to `DateTime(0)`.
-  - You are about to alter the column `created_at` on the `uploads` table. The data in that column could be lost. The data in that column will be cast from `DateTime(3)` to `DateTime(0)`.
-
-*/
+-- 0004: scan imports + phone pairing. Purely additive: new tables, new nullable/defaulted columns,
+-- new indexes and foreign keys. No existing column is modified and no data is rewritten.
 -- AlterTable
-ALTER TABLE `upload_tokens` ADD COLUMN `created_at` DATETIME(0) NOT NULL DEFAULT CURRENT_TIMESTAMP(0),
+ALTER TABLE `upload_tokens` ADD COLUMN `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     ADD COLUMN `new_room` BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN `room_label` VARCHAR(120) NULL,
     ADD COLUMN `upload_count` INTEGER NOT NULL DEFAULT 0,
-    ADD COLUMN `upload_limit` INTEGER NOT NULL DEFAULT 10,
-    MODIFY `expires_at` DATETIME(0) NOT NULL,
-    MODIFY `used_at` DATETIME(0) NULL;
+    ADD COLUMN `upload_limit` INTEGER NOT NULL DEFAULT 12;
 
 -- AlterTable
 ALTER TABLE `uploads` ADD COLUMN `scan_import_id` INTEGER NULL,
-    ADD COLUMN `token_id` INTEGER NULL,
-    MODIFY `created_at` DATETIME(0) NOT NULL DEFAULT CURRENT_TIMESTAMP(0);
+    ADD COLUMN `token_id` INTEGER NULL;
 
 -- CreateTable
 CREATE TABLE `scan_imports` (
@@ -28,9 +20,9 @@ CREATE TABLE `scan_imports` (
     `status` ENUM('pending', 'promoted', 'rejected') NOT NULL DEFAULT 'pending',
     `label` VARCHAR(120) NULL,
     `notes` TEXT NULL,
-    `promoted_at` DATETIME(0) NULL,
+    `promoted_at` DATETIME(3) NULL,
     `promoted_by` ENUM('michael', 'agent', 'system') NULL,
-    `created_at` DATETIME(0) NOT NULL DEFAULT CURRENT_TIMESTAMP(0),
+    `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
     UNIQUE INDEX `scan_imports_upload_id_key`(`upload_id`),
     INDEX `scan_imports_house_id_idx`(`house_id`),
@@ -74,3 +66,4 @@ ALTER TABLE `scan_imports` ADD CONSTRAINT `scan_imports_upload_id_fkey` FOREIGN 
 
 -- AddForeignKey
 ALTER TABLE `scan_import_data` ADD CONSTRAINT `scan_import_data_scan_import_id_fkey` FOREIGN KEY (`scan_import_id`) REFERENCES `scan_imports`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
+

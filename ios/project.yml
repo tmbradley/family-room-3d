@@ -36,7 +36,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: Q3HHMS5MLX
 
   HousePlannerClip:
     type: application.on-demand-install-capable
@@ -47,13 +47,12 @@ targets:
     info:
       path: HousePlannerClip/Info.plist
       properties:
-        NSCameraUsageDescription: "We need camera access to scan your room with LiDAR"
-        UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: false
-          UISceneConfigurations:
-            UIWindowSceneSessionRoleApplication:
-              - UISceneConfigurationName: "Default Configuration"
-                UISceneDelegateClassName: "$(PRODUCT_MODULE_NAME).SceneDelegate"
+        NSCameraUsageDescription: "The camera and LiDAR scanner capture your room's walls, doors and windows, and optional photos."
+        NSAppClip:
+          NSAppClipRequestEphemeralUserNotification: false
+          NSAppClipRequestLocationConfirmation: false
+        UIRequiredDeviceCapabilities:
+          - arkit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.michaelbradley.houseplanner.clip
@@ -68,7 +67,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
+        DEVELOPMENT_TEAM: Q3HHMS5MLX
       debug:
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG $(inherited)"
         SWIFT_OPTIMIZATION_LEVEL: "-Onone"

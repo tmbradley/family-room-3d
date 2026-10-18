@@ -7,26 +7,15 @@ import { auth, requireAuth, type AuthInfo } from './auth.js';
 import { getHouse, exportHouse } from './house.js';
 import { runExport } from './export.js';
 import { ApiError } from './util.js';
-import { getHistory, rollbackWorkspace, saveChanges, type Op } from './changes.js';
+import { getHistory, rollbackCurrent, rollbackWorkspace, saveChanges, type Op } from './changes.js';
 import { copyWorkspace, createBlankWorkspace, getRoomView, getWorkspaceView, listWorkspaces } from './workspaces.js';
 import { approveProposal, createProposal, getProposal, listProposals, previewProposal, rejectProposal } from './proposals.js';
 import { measurementHistory, recordMeasurement, unpin } from './measurements.js';
 import { fieldReference } from './entities.js';
 import { handleMcp } from './mcp.js';
-import {
-  generateUploadToken, 
-  validateUploadToken, 
-  generatePresignedUpload, 
-  completeUpload 
-} from './uploads.js';
-import { 
-  createScanImport, 
-  getScanImport, 
-  listScanImports, 
-  promoteScanImport, 
-  rejectScanImport,
-  type CapturedRoom 
-} from './scans.js';
+import { completeUpload, describeToken, generateUploadToken, importScan, presignUpload } from './uploads.js';
+import { getScanImport, listScanImports, promoteScanImport, rejectScanImport } from './scans.js';
+import { bodyLimit } from 'hono/body-limit';
 
 type Env = { Variables: { auth: AuthInfo } };
 export const app = new Hono<Env>();
@@ -126,7 +115,7 @@ app.post('/api/proposals/:id/reject', read, michaelOnly, async (c) => c.json(awa
 
 // Measurements: enter a measured value, pin (source = manual), unpin.
 const mBody = z.object({
-  workspaceId: z.number().int(), entityType: z.string(), entityId: z.number().int(), field: z.string(),
+  workspaceId: z.number().int().nullable(), entityType: z.string(), entityId: z.number().int(), field: z.string(),
   valueIn: z.number().int(), action: z.enum(['measured', 'pin']), note: z.string().max(500).optional(),
 });
 app.post('/api/measurements', read, michaelOnly, async (c) => {
@@ -139,118 +128,49 @@ app.post('/api/measurements/unpin', read, michaelOnly, async (c) => {
 });
 app.get('/api/measurements', read, async (c) => c.json(await measurementHistory(prisma, c.req.query('entityType') ?? '', id(c.req.query('entityId') ?? ''))));
 
-// Upload tokens and pairing
+// Current: read-only except through promoted scans, measurements and rollbacks.
+const houseId = async () => {
+  const h = await prisma.house.findFirst({ orderBy: { id: 'asc' } });
+  if (!h) throw new ApiError(404, 'not_seeded', 'No house');
+  return h.id;
+};
+app.get('/api/current/history', read, async (c) => c.json(await getHistory(prisma, { currentOf: await houseId() }, Number(c.req.query('limit')) || 50)));
+app.post('/api/current/rollback', read, michaelOnly, async (c) => {
+  const b = z.object({ toRevision: z.number().int().min(1), note: z.string().max(500).optional() }).parse(await c.req.json());
+  const h = await houseId();
+  return c.json(await tx((t) => rollbackCurrent(t, h, b.toRevision, b.note)));
+});
+
+// Phone pairing (Michael's session creates the code; the App Clip uses only the code).
 app.post('/api/upload-tokens', read, michaelOnly, async (c) => {
-  const body = z.object({ 
-    roomId: z.number().int().optional(),
-    newRoom: z.boolean().optional(),
-    uploadLimit: z.number().int().optional(),
-  }).parse(await c.req.json().catch(() => ({})));
-  const token = await generateUploadToken(body);
-  return c.json(token, 201);
+  const b = z.object({ roomId: z.number().int().optional(), newRoom: z.boolean().optional(), label: z.string().max(120).optional() }).parse(await c.req.json().catch(() => ({})));
+  return c.json(await generateUploadToken(b), 201);
 });
-
-// Validate token (used by App Clip)
-app.post('/api/upload-tokens/validate', async (c) => {
-  const body = z.object({ token: z.string() }).parse(await c.req.json());
-  const tokenRecord = await validateUploadToken(body.token);
-  return c.json({
-    valid: true,
-    roomId: tokenRecord.roomId,
-    expiresAt: tokenRecord.expiresAt,
-  });
-});
-
-// Generate presigned upload URL (used by App Clip)
+const tokenBody = z.object({ token: z.string().min(1).max(40) });
+app.post('/api/upload-tokens/validate', async (c) => c.json(await describeToken(tokenBody.parse(await c.req.json()).token)));
 app.post('/api/uploads/presigned', async (c) => {
-  const body = z.object({
-    token: z.string(),
-    kind: z.enum(['scan', 'photo']),
-    format: z.enum(['usdz', 'glb', 'roomplan_json', 'jpg', 'heic', 'png']),
-    scanImportId: z.number().int().optional(),
-  }).parse(await c.req.json());
-
-  const tokenRecord = await validateUploadToken(body.token);
-  const house = await prisma.house.findFirst();
-  if (!house) throw new ApiError(404, 'no_house', 'No house found');
-
-  const presigned = await generatePresignedUpload({
-    houseId: house.id,
-    roomId: tokenRecord.roomId ?? undefined,
-    kind: body.kind,
-    format: body.format,
-    scanImportId: body.scanImportId,
-  });
-
-  return c.json(presigned);
+  const b = tokenBody.extend({ kind: z.enum(['scan', 'photo']), format: z.string().max(20) }).parse(await c.req.json());
+  return c.json(await presignUpload(b.token, b.kind, b.format));
 });
-
-// Complete upload (used by App Clip)
 app.post('/api/uploads/:id/complete', async (c) => {
-  const body = z.object({
-    token: z.string(),
-    bytes: z.number().int(),
-  }).parse(await c.req.json());
-
-  await validateUploadToken(body.token);
-  await completeUpload(id(c.req.param('id')), body.bytes);
-  return c.json({ success: true });
+  const b = tokenBody.extend({ bytes: z.number().int().min(0).max(2_000_000_000) }).parse(await c.req.json());
+  return c.json(await completeUpload(b.token, id(c.req.param('id')), b.bytes));
+});
+app.post('/api/scans/import', bodyLimit({ maxSize: 20 * 1024 * 1024, onError: () => { throw new ApiError(413, 'too_large', 'Scan JSON is larger than 20 MB'); } }), async (c) => {
+  const b = tokenBody.extend({ uploadId: z.number().int(), roomplanData: z.unknown(), roomId: z.number().int().nullable().optional() }).parse(await c.req.json());
+  return c.json(await importScan(b.token, b), 201);
 });
 
-// No longer needed - upload count is incremented on each upload completion
-
-// Import scan from RoomPlan data
-app.post('/api/scans/import', async (c) => {
-  const body = z.object({
-    token: z.string(),
-    uploadId: z.number().int(),
-    roomplanData: z.any(), // CapturedRoom JSON
-    label: z.string().max(120).optional(),
-    roomId: z.number().int().optional(),
-  }).parse(await c.req.json());
-
-  const tokenRecord = await validateUploadToken(body.token);
-  const house = await prisma.house.findFirst();
-  if (!house) throw new ApiError(404, 'no_house', 'No house found');
-
-  const scanImport = await createScanImport({
-    houseId: house.id,
-    uploadId: body.uploadId,
-    roomplanData: body.roomplanData as CapturedRoom,
-    label: body.label,
-    roomId: body.roomId ?? tokenRecord.roomId ?? undefined,
-  });
-
-  return c.json(scanImport, 201);
-});
-
-// Scan imports management
+// Scan review (read for any signed-in reader; promote/reject only Michael).
 app.get('/api/scans', read, async (c) => {
-  const house = await prisma.house.findFirst();
-  if (!house) return c.json([]);
-  
   const status = c.req.query('status') as any;
-  const scans = await listScanImports(
-    house.id,
-    ['pending', 'promoted', 'rejected'].includes(status) ? status : undefined
-  );
-  return c.json(scans);
+  return c.json(await listScanImports(await houseId(), ['pending', 'promoted', 'rejected'].includes(status) ? status : undefined));
 });
-
-app.get('/api/scans/:id', read, async (c) => {
-  const scan = await getScanImport(id(c.req.param('id')));
-  return c.json(scan);
-});
-
-app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => {
-  const result = await promoteScanImport(id(c.req.param('id')), 'michael');
-  return c.json(result);
-});
-
+app.get('/api/scans/:id', read, async (c) => c.json(await getScanImport(id(c.req.param('id')))));
+app.post('/api/scans/:id/promote', read, michaelOnly, async (c) => c.json(await promoteScanImport(id(c.req.param('id')), 'michael')));
 app.post('/api/scans/:id/reject', read, michaelOnly, async (c) => {
-  const body = z.object({ notes: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));
-  const result = await rejectScanImport(id(c.req.param('id')), body.notes);
-  return c.json(result);
+  const b = z.object({ notes: z.string().max(1000).optional() }).parse(await c.req.json().catch(() => ({})));
+  return c.json(await rejectScanImport(id(c.req.param('id')), b.notes));
 });
 
 // MCP
@@ -299,6 +219,9 @@ app.get('/apple-app-site-association', (c) => {
 // Pages
 app.get('/login', serveStatic({ path: './server/public/login.html' }));
 app.get('/login.js', serveStatic({ path: './server/public/login.js' }));
+// App Clip invocation URL (https://<host>/scan?token=...). Public: shows the code, never anything else.
+app.get('/scan', serveStatic({ path: './server/public/scan.html' }));
+app.get('/scan.js', serveStatic({ path: './server/public/scan.js' }));
 for (const f of ['index.html', 'main.js', 'catalog.js', 'style.css', 'scene.js', 'api.js']) {
   app.get(`/${f}`, serveStatic({ path: `./${f}` }));
 }
