@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2A3E3FA8C238598F25764781 /* HousePlannerClip.app in Embed App Clips */ = {isa = PBXBuildFile; fileRef = AA0002B6 /* HousePlannerClip.app */; settings = {ATTRIBUTES = (RemoveHeaderOnCopy, ); }; };
 		AA0001AA /* HousePlannerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001A9 /* HousePlannerApp.swift */; };
 		AA0001AC /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001AB /* ContentView.swift */; };
 		AA0001AE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA0001AD /* Assets.xcassets */; };
@@ -16,6 +17,30 @@
 		AA0002C0 /* UploadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002BF /* UploadManager.swift */; };
 		AA0002C2 /* RoomPlanCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0002C1 /* RoomPlanCapture.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		0E1E3F08531E3989259A0133 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA00019E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA0002B5;
+			remoteInfo = HousePlannerClip;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		9CF89B6C33CBFEC402CA73AB /* Embed App Clips */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/AppClips";
+			dstSubfolderSpec = 16;
+			files = (
+				2A3E3FA8C238598F25764781 /* HousePlannerClip.app in Embed App Clips */,
+			);
+			name = "Embed App Clips";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AA0001A6 /* HousePlanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HousePlanner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -49,7 +74,7 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		AA00019D /* Root */ = {
+		AA00019D = {
 			isa = PBXGroup;
 			children = (
 				AA0001A8 /* HousePlanner */,
@@ -100,10 +125,12 @@
 				AA0001A2 /* Sources */,
 				AA0001A3 /* Frameworks */,
 				AA0001A4 /* Resources */,
+				9CF89B6C33CBFEC402CA73AB /* Embed App Clips */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				33932831ABEBCDCE03B3EAD2 /* PBXTargetDependency */,
 			);
 			name = HousePlanner;
 			productName = HousePlanner;
@@ -152,7 +179,7 @@
 			knownRegions = (
 				en,
 			);
-			mainGroup = AA00019D /* Root */;
+			mainGroup = AA00019D;
 			productRefGroup = AA0001A7 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -204,6 +231,15 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		33932831ABEBCDCE03B3EAD2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = HousePlannerClip;
+			target = AA0002B5 /* HousePlannerClip */;
+			targetProxy = 0E1E3F08531E3989259A0133 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA0001B2 /* Debug */ = {
@@ -406,7 +442,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.michaelbradley.houseplanner.clip";
+				PRODUCT_BUNDLE_IDENTIFIER = com.michaelbradley.houseplanner.clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -437,7 +473,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.michaelbradley.houseplanner.clip";
+				PRODUCT_BUNDLE_IDENTIFIER = com.michaelbradley.houseplanner.clip;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
