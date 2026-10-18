@@ -32,7 +32,7 @@ export async function roomViews(tx: Tx, where: any, workspaceId: number | null) 
     const pick = (name: string | null | undefined, color: string | null | undefined, n0: string | null, c0: string | null) =>
       ({ name: name ?? (color ? null : n0), color: color ?? c0 });
     return {
-    id: r.id, slug: r.slug, label: r.label, draftWorkspaceId: r.draftWorkspaceId,
+    id: r.id, slug: r.slug, label: r.label, draftWorkspaceId: r.draftWorkspaceId, planFrame: r.planFrame, mirrored: r.planFrame === 1,
     originXIn: r.originXIn, originYIn: r.originYIn, rotationDeg: r.rotationDeg, ceilingIn: r.ceilingIn,
     floor: { material: r.floorMaterial, finish: r.floorFinish, color: st?.floorColor ?? r.floorColor, colorName: st?.floorColorName ?? null, keep: r.floorKeep },
     wallColor: pick(st?.wallColorName, st?.wallColor, r.wallColorName, r.wallColor),

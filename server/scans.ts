@@ -1,5 +1,5 @@
 /**
- * Room scans from the App Clip.
+ * Room scans from the House Planner iPhone app.
  *
  *  1. parseCapturedRoom(): Apple RoomPlan `CapturedRoom` (JSONEncoder output) -> plan in whole inches.
  *  2. createScanImport(): stores the parsed scan relationally (scan_import_data) for review. Nothing
@@ -543,7 +543,14 @@ export async function furnishFromScan(id: number, name?: string) {
     for (const o of scan.objects) {
       const m = matchTemplate(o.kind, o.widthIn, o.depthIn, o.heightIn);
       const t = m && templates.get(m.slug);
-      if (!m || !t) { skipped.push(`${o.kind} ${o.widthIn}x${o.depthIn}x${o.heightIn}`); continue; }
+      if (!m || !t) {
+        if (o.kind === 'television') { // no template; the editor's wall-mounted TV shape
+          const i = n++;
+          ops.push({ op: 'create', entityType: 'furniture_item', tempRef: `i${i}`, fields: { kind: 'tv', name: (o.label || 'TV (scanned)').slice(0, 160), wIn: Math.max(1, o.widthIn), dIn: Math.max(1, o.depthIn), hIn: Math.max(1, o.heightIn), status: 'existing', notes: `From scan #${id} (RoomPlan "television")` } });
+          ops.push({ op: 'create', entityType: 'placement', fields: { roomId: si.roomId!, itemId: `$i${i}`, xIn: o.xIn, yIn: o.yIn, rotationDeg: editorRotation(o.rotationDeg), action: 'existing' } });
+        } else skipped.push(`${o.kind} ${o.widthIn}x${o.depthIn}x${o.heightIn}`);
+        continue;
+      }
       const def = templateBySlug.get(m.slug)!;
       const i = n++;
       ops.push({ op: 'create', entityType: 'furniture_item', tempRef: `i${i}`, fields: {

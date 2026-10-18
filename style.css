@@ -172,3 +172,20 @@ button.secondary:hover {
   #panes { flex-direction: column; }
   #drawer { position: fixed; inset: 0 0 0 auto; width: min(100vw, 420px); z-index: 40; }
 }
+
+/* templates, models, photos */
+.badge-model { margin-left: 6px; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: #6a4bc4; color: #fff; }
+.badge-model.failed { background: #a35a00; }
+#tplPanel { margin-top: 8px; display: grid; gap: 6px; }
+#tplPanel .prm { display: grid; grid-template-columns: 1fr 1.2fr; gap: 6px; align-items: center; font-size: 12px; }
+#tplPanel .prm input, #tplPanel .prm select { width: 100%; }
+#tplPanel .model { font-size: 12px; padding: 6px; background: #f3effa; border-radius: 6px; }
+.photo-strip { display: flex; gap: 6px; overflow-x: auto; padding: 4px 0; }
+.photo-strip a, .photo-grid a { flex: 0 0 auto; display: block; text-decoration: none; color: inherit; }
+.photo-strip img { height: 72px; width: 96px; object-fit: cover; border-radius: 6px; display: block; background: #ddd; }
+.photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; margin: 8px 0; }
+.photo-grid img { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 6px; display: block; background: #ddd; }
+.photo-cap { font-size: 11px; color: #5d554d; margin-top: 2px; line-height: 1.25; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.2); vertical-align: -2px; margin-right: 3px; }
+.mirror-banner { background: #fff4d6; border: 1px solid #e3c06a; border-radius: 6px; padding: 8px; margin-top: 8px; font-size: 12px; }
+table.objs td { font-size: 12px; padding: 2px 4px; }
